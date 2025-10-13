@@ -82,9 +82,12 @@ def plotImpacts(
     asym_pulls=False,
     include_ref=False,
     ref_name="ref.",
+    name="",
     show_numbers=False,
     show_legend=True,
     legend_pos="bottom",
+    group=None,
+    diff_pulls=True,
 ):
     impacts = impacts and bool(np.count_nonzero(df["absimpact"]))
     ncols = pulls + impacts
@@ -229,9 +232,12 @@ def plotImpacts(
                 name=name,
             )
 
+        sign = "+/-" if (oneSidedImpacts and not any(df["impact_down"] > 0)) else "+"
+        label = f"{sign}1σ impact ({name})" if name else f"{sign}1σ impact"
         fig.add_trace(
             make_bar(
                 key="impact_up",
+                name=label,
                 text_on_bars=text_on_bars,
                 opacity=0.5 if include_ref else 1,
             ),
@@ -241,34 +247,37 @@ def plotImpacts(
         if include_ref:
             fig.add_trace(
                 make_bar(
-                    key="impact_up_ref", name=f"+1σ impact ({ref_name})", filled=False
-                ),
-                row=1,
-                col=1,
-            )
-
-        fig.add_trace(
-            make_bar(
-                key="impact_down",
-                name="-1σ impact",
-                color="#e41a1c",
-                text_on_bars=text_on_bars,
-                opacity=0.5 if include_ref else 1,
-            ),
-            row=1,
-            col=1,
-        )
-        if include_ref:
-            fig.add_trace(
-                make_bar(
-                    key="impact_down_ref",
-                    name=f"-1σ impact ({ref_name})",
-                    color="#e41a1c",
+                    key="impact_up_ref",
+                    name=f"{sign}1σ impact ({ref_name})",
                     filled=False,
                 ),
                 row=1,
                 col=1,
             )
+
+        if (oneSidedImpacts and any(df["impact_down"] > 0)) or not oneSidedImpacts:
+            fig.add_trace(
+                make_bar(
+                    key="impact_down",
+                    name=f"-1σ impact ({name})" if name else "-1σ impact",
+                    color="#e41a1c",
+                    text_on_bars=text_on_bars,
+                    opacity=0.5 if include_ref else 1,
+                ),
+                row=1,
+                col=1,
+            )
+            if include_ref:
+                fig.add_trace(
+                    make_bar(
+                        key="impact_down_ref",
+                        name=f"-1σ impact ({ref_name})",
+                        color="#e41a1c",
+                        filled=False,
+                    ),
+                    row=1,
+                    col=1,
+                )
 
         impact_range = df["absimpact"].max()
         if include_ref:
@@ -391,6 +400,10 @@ def plotImpacts(
         if spacing > 0.5 * pullrange:  # make sure to have at least two ticks
             spacing /= 2.0
         xaxis_title = "Nuisance parameter"
+        if diff_pulls:
+            xaxis_title += "<br> θ-θ₀"
+        else:
+            xaxis_title += "<br> θ"
         info = dict(
             xaxis=dict(
                 range=[-pullrange, pullrange], dtick=spacing, **gridargs, **tickargs
@@ -442,13 +455,14 @@ def readFitInfoFromFile(
     fitresult,
     poi,
     group=False,
-    global_impacts=False,
+    impact_type=False,
     grouping=None,
     asym=False,
     filters=[],
     stat=0.0,
     normalize=False,
     scale=1,
+    diff_pulls=True,
 ):
     if poi is not None:
         out = io_tools.read_impacts_poi(
@@ -457,8 +471,8 @@ def readFitInfoFromFile(
             group,
             pulls=not group,
             asym=asym,
-            global_impacts=global_impacts,
-            add_total=group,
+            impact_type=impact_type,
+            add_total=group and not impact_type == "nonprofiled",
         )
         if group:
             impacts, labels = out
@@ -474,7 +488,7 @@ def readFitInfoFromFile(
                     True,
                     pulls=False,
                     asym=asym,
-                    global_impacts=global_impacts,
+                    impact_type=impact_type,
                     add_total=True,
                 )
 
@@ -531,9 +545,12 @@ def readFitInfoFromFile(
             pulls_prefit = pulls_prefit[mask]
             constraints_prefit = constraints_prefit[mask]
 
-        df["pull"] = pulls
         df["pull_prefit"] = pulls_prefit
-        df["pull"] = pulls - pulls_prefit
+
+        if diff_pulls:
+            df["pull"] = pulls - pulls_prefit
+        else:
+            df["pull"] = pulls
         df["abspull"] = np.abs(df["pull"])
 
         if asym:
@@ -558,7 +575,6 @@ def readHistImpacts(
     hist_impacts,
     hist_total,
     group=False,
-    global_impacts=False,
     grouping=None,
     asym=False,
     filters=[],
@@ -720,6 +736,11 @@ def parseArgs():
         help="Name of reference input for legend",
     )
     parser.add_argument(
+        "--name",
+        type=str,
+        help="Name of input for legend",
+    )
+    parser.add_argument(
         "-s",
         "--sort",
         default="absimpact",
@@ -803,14 +824,15 @@ def parseArgs():
     )
     parser.add_argument("--noImpacts", action="store_true", help="Don't show impacts")
     parser.add_argument(
-        "--globalImpacts",
-        action="store_true",
-        help="Show global impacts instead of traditional ones",
+        "--globalImpacts", action="store_true", help="Print global impacts"
+    )
+    parser.add_argument(
+        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
     )
     parser.add_argument(
         "--asymImpacts",
         action="store_true",
-        help="Show asymmetric numbers from likelihood confidence intervals",
+        help="Print asymmetric impacts from likelihood, otherwise symmetric from hessian",
     )
     parser.add_argument(
         "--showNumbers", action="store_true", help="Show values of impacts"
@@ -862,6 +884,11 @@ def parseArgs():
         type=float,
         default=1.0,
         help="Scale impacts by this number",
+    )
+    parser.add_argument(
+        "--pullsNoDiff",
+        action="store_true",
+        help="Plot actual nuisance parameter value, by default nuisance parameter difference w.r.t. prefit value",
     )
     return parser.parse_args()
 
@@ -919,8 +946,13 @@ def make_plots(
         asym_pulls=args.diffPullAsym,
         include_ref=include_ref,
         ref_name=args.refName,
+        name=args.name,
         show_numbers=args.showNumbers,
-        show_legend=not group and not args.noImpacts,
+        show_legend=(not group and not args.noImpacts)
+        or include_ref
+        or args.name is not None,
+        group=group,
+        diff_pulls=not args.pullsNoDiff,
     )
 
     if args.num and args.num < int(df.shape[0]):
@@ -950,6 +982,12 @@ def load_dataframe_parms(
     grouping=None,
     translate_label={},
 ):
+    if args.globalImpacts:
+        impact_type = "global"
+    elif args.nonprofiledImpacts:
+        impact_type = "nonprofiled"
+    else:
+        impact_type = "traditional"
 
     if not group:
         df = readFitInfoFromFile(
@@ -957,18 +995,20 @@ def load_dataframe_parms(
             poi,
             False,
             asym=asym,
-            global_impacts=args.globalImpacts,
+            impact_type=impact_type,
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
             scale=args.scaleImpacts,
+            diff_pulls=not args.pullsNoDiff,
         )
     elif group:
         df = readFitInfoFromFile(
             fitresult,
             poi,
             True,
-            global_impacts=args.globalImpacts,
+            asym=asym,
+            impact_type=impact_type,
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
@@ -982,12 +1022,13 @@ def load_dataframe_parms(
             poi,
             group,
             asym=asym,
-            global_impacts=args.globalImpacts,
+            impact_type=impact_type,
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
             grouping=grouping,
             scale=args.scaleImpacts,
+            diff_pulls=not args.pullsNoDiff,
         )
         df = df.merge(df_ref, how="outer", on="label", suffixes=("", "_ref"))
 
@@ -1038,7 +1079,6 @@ def load_dataframe_hists(
         hist_impacts,
         hist_total,
         group,
-        global_impacts=args.globalImpacts,
         filters=args.filters,
         stat=args.stat / 100.0,
         normalize=normalize,
@@ -1052,7 +1092,6 @@ def load_dataframe_hists(
             hist_impacts_ref,
             hist_total_ref,
             group,
-            global_impacts=args.globalImpacts,
             filters=args.filters,
             stat=args.stat / 100.0,
             normalize=normalize,
@@ -1220,6 +1259,8 @@ def main():
         impacts_name = "impacts"
         if args.globalImpacts:
             impacts_name = f"global_{impacts_name}"
+        elif args.nonprofiledImpacts:
+            impacts_name = f"nonprofiled_{impacts_name}"
 
         grouping = None
         if args.grouping is not None:

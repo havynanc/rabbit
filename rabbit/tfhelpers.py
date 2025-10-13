@@ -105,8 +105,26 @@ def segment_sum_along_axis(x, segment_ids, idx, num_segments):
     perm = [idx] + [i for i in range(len(x.shape)) if i != idx]
     x_transposed = tf.transpose(x, perm)
 
+    # Count leading/trailing -1s and cut them off
+    nleading = tf.reduce_sum(
+        tf.cast(
+            tf.cumsum(tf.cast(segment_ids == -1, tf.int32))
+            == tf.range(1, len(segment_ids) + 1),
+            tf.int32,
+        )
+    )
+    ntrailing = tf.reduce_sum(
+        tf.cast(
+            tf.cumsum(tf.cast(segment_ids[::-1] == -1, tf.int32))
+            == tf.range(1, len(segment_ids) + 1),
+            tf.int32,
+        )
+    )
+    x_transposed = x_transposed[nleading : len(x_transposed) - ntrailing]
+    segment_ids_valid = segment_ids[nleading : len(segment_ids) - ntrailing]
+
     # Apply segment_sum along axis 0
-    rebinned = tf.math.segment_sum(x_transposed, segment_ids)
+    rebinned = tf.math.segment_sum(x_transposed, segment_ids_valid)
 
     # Update static shape if possible
     static_shape = rebinned.shape.as_list()

@@ -23,9 +23,12 @@ def parseArgs():
         "--globalImpacts", action="store_true", help="Print global impacts"
     )
     parser.add_argument(
+        "--nonprofiledImpacts", action="store_true", help="Print non-profiled impacts"
+    )
+    parser.add_argument(
         "--asymImpacts",
         action="store_true",
-        help="Print asymmetric impacts from likelihood confidence intervals",
+        help="Print asymmetric impacts from likelihood, otherwise symmetric from hessian",
     )
     parser.add_argument(
         "inputFile",
@@ -50,6 +53,12 @@ def parseArgs():
         "--relative",
         action="store_true",
         help="Print relative uncertainty, only for '--hist'",
+    )
+    parser.add_argument(
+        "--scale",
+        default=1,
+        type=float,
+        help="Scale impacts",
     )
     return parser.parse_args()
 
@@ -81,17 +90,25 @@ def printImpactsParm(args, fitresult, poi):
     if args.relative:
         raise NotImplementedError("Relative uncertainty for POIs not implemented")
 
+    if args.globalImpacts:
+        impact_type = "global"
+    elif args.nonprofiledImpacts:
+        impact_type = "nonprofiled"
+    else:
+        impact_type = "traditional"
+
     impacts, labels = io_tools.read_impacts_poi(
         fitresult,
         poi,
+        add_total=not args.nonprofiledImpacts,
         asym=args.asymImpacts,
         grouped=not args.ungroup,
-        global_impacts=args.globalImpacts,
+        impact_type=impact_type,
     )
     printImpacts(args, impacts, labels, poi)
 
 
-def printImpacts(args, impacts, labels, poi, scale=100, unit="nuisance unc. %"):
+def printImpacts(args, impacts, labels, poi, scale=1, unit="unit"):
     if args.sort:
 
         def is_scalar(val):
@@ -101,10 +118,12 @@ def printImpacts(args, impacts, labels, poi, scale=100, unit="nuisance unc. %"):
         labels = labels[order]
         impacts = impacts[order]
 
+    scale = scale * args.scale
+
     nround = 5
     if args.asymImpacts:
         fimpact = (
-            lambda x: f"{round(max(x)*scale, nround)} / {round(min(x)*100, nround)}"
+            lambda x: f"{round(max(x)*scale, nround)} / {round(min(x)*scale, nround)}"
         )
     else:
         fimpact = lambda x: round(x * scale, nround)

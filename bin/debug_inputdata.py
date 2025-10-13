@@ -93,7 +93,7 @@ def debug_input_data(input_file, output_dir=None, verbose=False, channels=None):
                 logger.info(f"  - {hist_obj.values()[idxs]} events in bin {bins_str}")
         else:
             logger.info(
-                f"✓ All bins in channel {channel} have more than {threshold} data observations"
+                f"✓ All bins in channel {channel} have more than {threshold} data observations. Smallest bin has {np.min(hist_obj.values())}"
             )
 
     # 2.2 Check for bins with low number of prediction

@@ -12,6 +12,19 @@ from rabbit import tfhelpers as tfh
 logger = logging.child_logger(__name__)
 
 
+def match_regexp_params(regular_expressions, parameter_names):
+    if isinstance(regular_expressions, str):
+        regular_expressions = [regular_expressions]
+    # Find parameters that match any regex
+    compiled_expressions = [re.compile(expr) for expr in regular_expressions]
+    matched_parameters = [
+        s
+        for s in parameter_names
+        if any(regex.match(s.decode()) for regex in compiled_expressions)
+    ]
+    return matched_parameters
+
+
 class FitterCallback:
     def __init__(self, xv):
         self.iiter = 0
@@ -103,6 +116,8 @@ class Fitter:
             self.init_blinding_values(options.unblind)
 
         self.parms = np.concatenate([self.pois, self.indata.systs])
+
+        self.init_frozen_params(options.freezeParameters)
 
         self.allowNegativePOI = options.allowNegativePOI
 
@@ -202,20 +217,27 @@ class Fitter:
             and ((not self.binByBinStat) or self.binByBinStatType == "normal")
         )
 
-    def init_blinding_values(self, unblind_parameter_expressions=[]):
-        # Find parameters that match any regex
-        compiled_expressions = [
-            re.compile(expr) for expr in unblind_parameter_expressions
-        ]
+    def init_frozen_params(self, frozen_parmeter_expressions):
+        self.frozen_params = match_regexp_params(
+            frozen_parmeter_expressions, self.parms
+        )
+        self.frozen_params_mask = np.isin(self.parms, self.frozen_params)
+        self.frozen_indices = np.where(self.frozen_params_mask)[0]
+        self.floating_indices = np.where(~self.frozen_params_mask)[0]
 
-        unblind_parameters = [
-            s
-            for s in [
+        keep = tf.cast(~self.frozen_params_mask, dtype=self.indata.dtype)
+        # Outer product of keep vectors masks both rows & columns
+        self.frozen_params_mask2d = tf.tensordot(keep, keep, axes=0)  # shape [n, n]
+
+    def init_blinding_values(self, unblind_parameter_expressions=[]):
+
+        unblind_parameters = match_regexp_params(
+            unblind_parameter_expressions,
+            [
                 *self.indata.signals,
                 *[self.indata.systs[i] for i in self.indata.noigroupidxs],
-            ]
-            if any(regex.match(s.decode()) for regex in compiled_expressions)
-        ]
+            ],
+        )
 
         # check if dataset is an integer (i.e. if it is real data or not) and use this to choose the random seed
         is_dataobs_int = np.sum(
@@ -531,6 +553,67 @@ class Fitter:
                         dtype=self.beta.dtype,
                     )
                 )
+
+    def nonprofiled_impacts_parms(self):
+        x_tmp = tf.identity(self.x.value())
+        x_tmp_tiled = tf.tile(
+            tf.reshape(x_tmp, [1, 1, -1]), [len(self.frozen_indices), 2, 1]
+        )
+        nonprofiled_impacts = tf.Variable(x_tmp_tiled)
+
+        for i, idx in enumerate(self.frozen_indices):
+            logger.info(f"Now at parameter {self.frozen_params[i]}")
+
+            for j, variation in enumerate((1, -1)):
+                self.x.assign(x_tmp)
+                # vary the non-profile parameter
+                self.x[idx].assign(variation)
+                # minimize
+                self.minimize()
+                # difference w.r.t. nominal fit
+                diff = x_tmp - self.x.value()
+                nonprofiled_impacts[i, j].assign(diff)
+
+            # back to original value
+            self.x[idx].assign(x_tmp[idx])
+
+        # grouped nonprofiled impacts
+        @tf.function
+        def envelope(values):
+            zeros = tf.zeros(
+                (tf.shape(values)[0], tf.shape(values)[-1]), dtype=values.dtype
+            )
+            vmin = tf.reduce_min(values, axis=1)
+            vmax = tf.reduce_max(values, axis=1)
+            lower = -tf.sqrt(tf.reduce_sum(tf.minimum(zeros, vmin) ** 2, axis=0))
+            upper = tf.sqrt(tf.reduce_sum(tf.maximum(zeros, vmax) ** 2, axis=0))
+            return tf.stack([lower, upper])
+
+        impact_group_names = []
+        impact_groups = []
+
+        for group, idxs in zip(self.indata.systgroups, self.indata.systgroupidxs):
+            frozen_mask = tf.constant(np.isin(self.frozen_indices, idxs))
+            frozen_idxs = tf.where(frozen_mask)
+            if tf.size(frozen_idxs) > 0:
+                selected_impacts = tf.gather(nonprofiled_impacts, frozen_idxs[:, 0])
+                group_env = envelope(selected_impacts)
+                impact_groups.append(group_env)
+                impact_group_names.append(group)
+
+        # Add total envelope
+        total_env = envelope(nonprofiled_impacts)
+        impact_groups.append(total_env)
+        impact_group_names.append(b"Total")
+
+        impact_groups = tf.stack(impact_groups)
+
+        return (
+            self.frozen_params,
+            nonprofiled_impacts.numpy(),
+            impact_group_names,
+            impact_groups.numpy(),
+        )
 
     def _compute_impact_group(self, v, idxs):
         cov_reduced = tf.gather(self.cov[self.npoi :, self.npoi :], idxs, axis=0)
@@ -1547,12 +1630,17 @@ class Fitter:
             val = self._compute_loss()
         grad = t.gradient(val, self.x)
 
+        grad = tf.where(
+            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
+        )
+
         return val, grad
 
     # FIXME in principle this version of the function is preferred
     # but seems to introduce some small numerical non-reproducibility
     @tf.function
     def loss_val_grad_hessp_fwdrev(self, p):
+        p = tf.where(self.frozen_params_mask, tf.constant(0.0, dtype=p.dtype), p)
         p = tf.stop_gradient(p)
         with tf.autodiff.ForwardAccumulator(self.x, p) as acc:
             with tf.GradientTape() as grad_tape:
@@ -1560,16 +1648,31 @@ class Fitter:
             grad = grad_tape.gradient(val, self.x)
         hessp = acc.jvp(grad)
 
+        grad = tf.where(
+            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
+        )
+        hessp = tf.where(
+            self.frozen_params_mask, tf.constant(0.0, dtype=hessp.dtype), hessp
+        )
+
         return val, grad, hessp
 
     @tf.function
     def loss_val_grad_hessp_revrev(self, p):
+        p = tf.where(self.frozen_params_mask, tf.constant(0.0, dtype=p.dtype), p)
         p = tf.stop_gradient(p)
         with tf.GradientTape() as t2:
             with tf.GradientTape() as t1:
                 val = self._compute_loss()
             grad = t1.gradient(val, self.x)
         hessp = t2.gradient(grad, self.x, output_gradients=p)
+
+        grad = tf.where(
+            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
+        )
+        hessp = tf.where(
+            self.frozen_params_mask, tf.constant(0.0, dtype=hessp.dtype), hessp
+        )
 
         return val, grad, hessp
 
@@ -1582,6 +1685,11 @@ class Fitter:
                 val = self._compute_loss(profile=profile)
             grad = t1.gradient(val, self.x)
         hess = t2.jacobian(grad, self.x)
+
+        grad = tf.where(
+            self.frozen_params_mask, tf.constant(0.0, dtype=grad.dtype), grad
+        )
+        hess = self.frozen_params_mask2d * hess
 
         return val, grad, hess
 
@@ -1636,7 +1744,6 @@ class Fitter:
             def scipy_loss(xval):
                 self.x.assign(xval)
                 val, grad = self.loss_val_grad()
-                # print(f"Gradient: {grad}")
                 return val.__array__(), grad.__array__()
 
             def scipy_hessp(xval, pval):

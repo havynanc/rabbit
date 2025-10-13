@@ -104,6 +104,34 @@ jobs:
           echo "PYTHONPATH=$PYTHONPATH" >> $GITHUB_OUTPUT
           echo "PATH=$PATH" >> $GITHUB_OUTPUT
 
+  symmerizations:
+    runs-on: [self-hosted, linux, x64]
+    needs: setenv
+
+    steps:
+      - env:
+          RABBIT_OUTDIR: ${{ needs.setenv.outputs.RABBIT_OUTDIR }}
+          PYTHONPATH: ${{ needs.setenv.outputs.PYTHONPATH }}
+          PATH: ${{ needs.setenv.outputs.PATH }}
+          WEB_DIR: ${{ needs.setenv.outputs.WEB_DIR }}
+          PLOT_DIR: ${{ needs.setenv.outputs.PLOT_DIR }}
+        run: |
+          echo "RABBIT_OUTDIR=${RABBIT_OUTDIR}" >> $GITHUB_ENV
+          echo "PYTHONPATH=${PYTHONPATH}" >> $GITHUB_ENV
+          echo "PATH=${PATH}" >> $GITHUB_ENV
+          echo "WEB_DIR=${WEB_DIR}" >> $GITHUB_ENV
+          echo "PLOT_DIR=${PLOT_DIR}" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v4
+    
+      - name: symmetrizations
+        run: >- 
+          python tests/symmetrizations.py -o $WEB_DIR/$PLOT_DIR/symmetrizations/ --titlePos 0
+
+      - name: symmetrizations with fluctations
+        run: >- 
+          python tests/symmetrizations.py -o $WEB_DIR/$PLOT_DIR/symmetrizations/ --titlePos 0 --fluctuate
+
   make-tensor:
     runs-on: [self-hosted, linux, x64]
     needs: setenv
@@ -366,7 +394,7 @@ jobs:
 
   copy-clean:
     runs-on: [self-hosted, linux, x64]
-    needs: [setenv, plotting, likelihoodscans]
+    needs: [setenv, symmerizations, plotting, likelihoodscans]
     if: always() 
     steps:
       - env:

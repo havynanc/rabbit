@@ -14,11 +14,8 @@ def get_fitresult(fitresult_filename, result=None, meta=False):
         key = f"{key}_{result}"
     elif key not in h5file.keys():  # fallback in case only asimov was fit
         key = f"{key}_asimov"
-        if key not in h5file.keys():
-            raise ValueError(
-                f"'{key}' not in h5file, available keys are {h5file.keys()}"
-            )
-
+    if key not in h5file.keys():
+        raise ValueError(f"'{key}' not in h5file, available keys are {h5file.keys()}")
     h5results = ioutils.pickle_load_h5py(h5file[key])
     if meta:
         meta = ioutils.pickle_load_h5py(h5file["meta"])
@@ -39,19 +36,19 @@ def read_impacts_poi(
     fitresult,
     poi,
     grouped=False,
-    global_impacts=False,
+    impact_type="traditional",
     pulls=False,
     add_total=True,
     asym=False,
 ):
     # read impacts of a single POI
 
-    if asym:
+    if asym and impact_type == "traditional":
         h_impacts = fitresult["contour_scans"].get()[{"confidence_level": "1.0"}]
     else:
         impact_name = "impacts"
-        if global_impacts:
-            impact_name = f"global_{impact_name}"
+        if impact_type != "traditional":
+            impact_name = f"{impact_type}_{impact_name}"
         if grouped:
             impact_name += "_grouped"
 
@@ -72,10 +69,10 @@ def read_impacts_poi(
 
     if pulls:
         pulls_labels, pulls, constraints = get_pulls_and_constraints(
-            fitresult, asym=asym
+            fitresult, asym=asym and impact_type == "traditional"
         )
         pulls_labels, pulls_prefit, constraints_prefit = get_pulls_and_constraints(
-            fitresult, asym=asym, prefit=True
+            fitresult, asym=asym and impact_type == "traditional", prefit=True
         )
         if len(pulls_labels) != len(labels):
             mask = [l in labels for l in pulls_labels]
@@ -121,7 +118,7 @@ def get_postfit_hist_cov(fitresult, physics_model="Basemodel", channels=None):
         found_channels = [c for c in result["channels"].keys() if c in channels]
         if list(channels) != list(found_channels):
             raise RuntimeError(
-                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}"
+                f"Not all channels found in fitresult or the order is wrong, requested: {channels} and found {found_channels}. Available: {result['channels'].keys()}."
             )
         h_data = [
             result["channels"][c]["hist_postfit_inclusive"].get() for c in channels

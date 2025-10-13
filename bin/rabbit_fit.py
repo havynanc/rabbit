@@ -141,7 +141,7 @@ def make_parser():
         ],
         type=float,
         nargs="+",
-        help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%)",
+        help="Confidence level in standard deviations for contour scans (1 = 1 sigma = 68%%)",
     )
     parser.add_argument(
         "--contourScan2D",
@@ -286,7 +286,7 @@ def make_parser():
         specifying the model defined in rabbit/physicsmodels/ followed by arguments passed in the model __init__, 
         e.g. '-m Project ch0 eta pt' to get a 2D projection to eta-pt or '-m Project ch0' to get the total yield.  
         This argument can be called multiple times.
-        Custom models can be specified with the full path to the custom model e.g. '-m custom_modesl.MyCustomModel'.
+        Custom models can be specified with the full path to the custom model e.g. '-m custom_models.MyCustomModel'.
         """,
     )
     parser.add_argument(
@@ -305,6 +305,12 @@ def make_parser():
         default=False,
         action="store_true",
         help="compute impacts in terms of variations of global observables (as opposed to nuisance parameters directly)",
+    )
+    parser.add_argument(
+        "--nonProfiledImpacts",
+        default=False,
+        action="store_true",
+        help="compute impacts of frozen (non-profiled) systematics",
     )
     parser.add_argument(
         "--chisqFit",
@@ -333,6 +339,15 @@ def make_parser():
         help="""
         Specify list of regex to unblind matching parameters of interest. 
         E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
+        """,
+    )
+    parser.add_argument(
+        "--freezeParameters",
+        type=str,
+        default=[],
+        nargs="+",
+        help="""
+        Specify list of regex to freeze matching parameters of interest. 
         """,
     )
 
@@ -473,9 +488,30 @@ def fit(args, fitter, ws, dofit=True):
 
             val, grad, hess = fitter.loss_val_grad_hess()
 
-            edmval, cov = edmval_cov(grad, hess)
+            if len(fitter.frozen_params) > 0:
+                # Only keep parameters that were floating in the fit
+                subgrad = tf.gather(grad, fitter.floating_indices, axis=0)
+                subhess = tf.gather(hess, fitter.floating_indices, axis=0)
+                subhess = tf.gather(subhess, fitter.floating_indices, axis=1)
+                edmval, cov = edmval_cov(subgrad, subhess)
+            else:
+                edmval, cov = edmval_cov(grad, hess)
 
             logger.info(f"edmval: {edmval}")
+
+            if len(fitter.frozen_params) > 0:
+                # update only the covariance entries for parameters that were floating in the fit
+                coords = tf.stack(
+                    tf.meshgrid(
+                        fitter.floating_indices, fitter.floating_indices, indexing="ij"
+                    ),
+                    axis=-1,
+                )
+                coords = tf.reshape(coords, [-1, 2])
+
+                updates = tf.reshape(cov, [-1])
+
+                cov = tf.tensor_scatter_nd_update(fitter.cov, coords, updates)
 
             fitter.cov.assign(cov)
 
@@ -487,6 +523,11 @@ def fit(args, fitter, ws, dofit=True):
                 # It should be near-zero by construction as long as the analytic profiling is
                 # correct
                 _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
+                if len(fitter.frozen_params) > 0:
+                    # Only keep parameters that were floating in the fit
+                    gradbeta = tf.gather(gradbeta, fitter.floating_indices, axis=0)
+                    hessbeta = tf.gather(hessbeta, fitter.floating_indices, axis=0)
+                    hessbeta = tf.gather(hessbeta, fitter.floating_indices, axis=1)
                 edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
                 logger.info(f"edmvalbeta: {edmvalbeta}")
 
@@ -534,6 +575,10 @@ def fit(args, fitter, ws, dofit=True):
 
     if not args.noHessian:
         ws.add_cov_hist(fitter.cov)
+
+    if args.nonProfiledImpacts:
+        # TODO: based on covariance
+        ws.add_nonprofiled_impacts_hist(*fitter.nonprofiled_impacts_parms())
 
     if args.scan is not None:
         parms = np.array(fitter.parms).astype(str) if len(args.scan) == 0 else args.scan
@@ -660,7 +705,7 @@ def main():
         postfit_time = []
         fit_time = []
         for i, ifit in enumerate(fits):
-            group = "results"
+            group = ["results"]
 
             if args.pseudoData is None:
                 datasets = [
@@ -675,13 +720,13 @@ def main():
 
                 ifitter.defaultassign()
                 if ifit == -1:
-                    group += "_asimov"
+                    group.append("asimov")
                     ifitter.set_nobs(ifitter.expected_yield())
                 else:
                     if ifit == 0:
                         ifitter.set_nobs(data_values)
                     elif ifit >= 1:
-                        group += f"_toy{ifit}"
+                        group.append(f"toy{ifit}")
                         ifitter.toyassign(
                             data_values,
                             syst_randomize=args.toysSystRandomize,
@@ -692,7 +737,10 @@ def main():
 
                 if np.shape(datasets)[0] > 1:
                     # in case there are more than 1 pseudodata set, label each one
-                    group += f"_{indata.pseudodatanames[j]}"
+                    if j == 0:
+                        group.append(indata.pseudodatanames[j])
+                    else:
+                        group[-1] = indata.pseudodatanames[j]
 
                 ws.add_parms_hist(
                     values=ifitter.x,
@@ -722,7 +770,7 @@ def main():
                 else:
                     fit_time.append(time.time())
 
-                ws.dump_and_flush(group)
+                ws.dump_and_flush("_".join(group))
                 postfit_time.append(time.time())
 
     end_time = time.time()
