@@ -31,9 +31,20 @@ class AngularCoefficients(PhysicsModel):
         selection={},
         rebin_axes={},
         sum_axes=[],
-        helicity_axis="helicitySig",
+        helicity_axis=None,
     ):
         self.key = key
+
+        if helicity_axis is None:
+            axes_names = [a.name for a in indata.channel_info[channel]["axes"]]
+            if "helicitySig" in axes_names:
+                helicity_axis = "helicitySig"
+            elif "helicity" in axes_names:
+                helicity_axis = "helicity"
+            else:
+                raise RuntimeError(
+                    f"Could not find helicity axes, available axes are {axes_names}"
+                )
 
         # sigma_i
         self.num = helpers.Term(

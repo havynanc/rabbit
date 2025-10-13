@@ -545,11 +545,14 @@ def make_plot(
                         label = f"{label} < {hi}"
                 text.append(label)
 
+            text_loc = (
+                args.extraTextLoc if args.extraTextLoc else [0.05, 0.96 - i * 0.08]
+            )
             plot_tools.wrap_text(
                 text,
                 ax1,
                 # 0.05,
-                *args.extraTextLoc,
+                *text_loc,
                 # 0.96 - i * 0.08,
                 ha="left",
                 text_size="small",
@@ -599,6 +602,8 @@ def main():
     args = parseArgs()
     global logger
     logger = logging.setup_logger(__file__, args.verbose, args.noColorLogger)
+
+    plt.rcParams["font.size"] = plt.rcParams["font.size"] * args.scaleTextSize
 
     indata = inputdata.FitInputData(args.infile, pseudodata=args.pseudodata)
 

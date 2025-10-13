@@ -131,6 +131,11 @@ def parseArgs():
         action="store_true",
         help="Don't show contour from contour scan",
     )
+    parser.add_argument(
+        "--spiralScan",
+        action="store_true",
+        help="Plot spiral scan illustration",
+    )
     return parser.parse_args()
 
 
@@ -391,6 +396,7 @@ def main():
             title=args.title,
             subtitle=args.subtitle,
             titlePos=args.titlePos,
+            spiral_scan=args.spiralScan,
         )
         os.makedirs(args.outpath, exist_ok=True)
         outfile = os.path.join(args.outpath, f"nll_scan2D_{px}_{py}")
