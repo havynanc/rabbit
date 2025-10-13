@@ -335,6 +335,12 @@ def make_parser():
         E.g. use '--unblind ^signal$' to unblind a parameter named signal or '--unblind' to unblind all.
         """,
     )
+    parser.add_argument(
+        "--chisqFitProtectNullBins",
+        default=False,
+        action="store_true",
+        help="Protect against null bins (by discarding them) in chi-square fit",
+    )
 
     return parser.parse_args()
 
