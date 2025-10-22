@@ -38,6 +38,7 @@ def read_impacts_poi(
     grouped=False,
     impact_type="traditional",
     pulls=False,
+    gen=False,
     add_total=True,
     asym=False,
 ):
@@ -74,19 +75,48 @@ def read_impacts_poi(
         pulls_labels, pulls_prefit, constraints_prefit = get_pulls_and_constraints(
             fitresult, asym=asym and impact_type == "traditional", prefit=True
         )
+        if gen:
+            pulls_labels, pulls_gen, constraints_gen = get_pulls_and_constraints(
+                fitresult, asym=asym and impact_type == "traditional", gen=True
+            )
         if len(pulls_labels) != len(labels):
             mask = [l in labels for l in pulls_labels]
             pulls = pulls[mask]
             pulls_prefit = pulls_prefit[mask]
             constraints = constraints[mask]
             constraints_prefit = constraints_prefit[mask]
-        return pulls, pulls_prefit, constraints, constraints_prefit, impacts, labels
+            if gen:
+                pulls_gen = pulls_gen[mask]
+                constraints_gen = constraints_gen[mask]
+        if not gen:
+            return pulls, pulls_prefit, constraints, constraints_prefit, impacts, labels
+        else:
+            return (
+                pulls,
+                pulls_prefit,
+                pulls_gen,
+                constraints,
+                constraints_prefit,
+                constraints_gen,
+                impacts,
+                labels,
+            )
 
     return impacts, labels
 
 
-def get_pulls_and_constraints(fitresult, prefit=False, asym=False):
-    hist_name = "parms_prefit" if prefit else "parms"
+def get_pulls_and_constraints(fitresult, prefit=False, gen=False, asym=False):
+    if prefit and gen:
+        raise Exception(
+            "Cannot specify both prefit and gen in get_pulls_and_constraints"
+        )
+    elif prefit:
+        hist_name = "parms_prefit"
+    elif gen:
+        hist_name = "parms_gen"
+    else:
+        hist_name = "parms"
+    # hist_name = "parms_prefit" if prefit else "parms"
     h_parms = fitresult[hist_name].get()
     labels = np.array(h_parms.axes["parms"])
     pulls = h_parms.values()

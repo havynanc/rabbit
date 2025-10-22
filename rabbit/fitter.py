@@ -396,24 +396,26 @@ class Fitter:
 
     def bayesassign(self):
         # FIXME use theta0 as the mean and constraintweight to scale the width
-        if self.npoi == 0:
-            self.x.assign(
-                self.theta0
-                + tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
-            )
-        else:
-            self.x.assign(
-                tf.concat(
-                    [
-                        self.xpoidefault,
-                        self.theta0
-                        + tf.random.normal(
-                            shape=self.theta0.shape, dtype=self.theta0.dtype
-                        ),
-                    ],
-                    axis=0,
-                )
-            )
+        # if self.npoi == 0:
+        #     self.x.assign(
+        #         self.theta0
+        #         + tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
+        #     )
+        # else:
+        #     self.x.assign(
+        #         tf.concat(
+        #             [
+        #                 self.xpoidefault,
+        #                 self.theta0
+        #                 + tf.random.normal(
+        #                     shape=self.theta0.shape, dtype=self.theta0.dtype
+        #                 ),
+        #             ],
+        #             axis=0,
+        #         )
+        #     )
+        self.x.assign(tf.one_hot(12, 73, dtype=tf.float64))
+        self.x0 = tf.identity(self.x)
 
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
@@ -442,9 +444,10 @@ class Fitter:
 
     def frequentistassign(self):
         # FIXME use theta as the mean and constraintweight to scale the width
-        self.theta0.assign(
-            tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
-        )
+        # self.theta0.assign(
+        #     tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
+        # )
+        self.theta0.assign(tf.one_hot(12, 73, dtype=tf.float64))
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
                 # FIXME this is only valid for beta0=beta=1 (but this should always be the case when throwing toys)
@@ -1585,18 +1588,34 @@ class Fitter:
                 # constant when evaluating global impacts from observed data
                 if self.chisqFitProtectNullBins:
                     # protection against null bins
-                    nobsnull_0_0 = tf.equal(self.nobs, tf.zeros_like(self.nobs))
-                    nexpnull_0_0 = tf.equal(nexp, tf.zeros_like(nexp))
+                    # nobsnull_0_0 = tf.equal(self.nobs, tf.zeros_like(self.nobs))
+                    # nexpnull_0_0 = tf.equal(nexp, tf.zeros_like(nexp))
+                    # nobsnan = tf.logical_not(tf.math.is_finite(self.nobs))
+                    # nexpnan = tf.logical_not(tf.math.is_finite(nexp))
+                    # nobsnull_0 = tf.logical_or(nobsnull_0_0, nobsnan)
+                    # nexpnull_0 = tf.logical_or(nexpnull_0_0, nexpnan)
+                    # nobsnull = tf.logical_or(nobsnull_0, nexpnull_0)
+                    # nobssafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nobs)
+                    # nexpsafe = tf.where(nobsnull, tf.ones_like(self.nobs), nexp)
+
+                    # ln = 0.5 * tf.reduce_sum(
+                    #     (nexpsafe - nobssafe) ** 2 / tf.stop_gradient(nobssafe), axis=-1
+                    # )
+
+                    nobsnull_0 = tf.equal(self.nobs, tf.zeros_like(self.nobs))
+                    nexpnull_0 = tf.equal(nexp, tf.zeros_like(nexp))
                     nobsnan = tf.logical_not(tf.math.is_finite(self.nobs))
                     nexpnan = tf.logical_not(tf.math.is_finite(nexp))
-                    nobsnull_0 = tf.logical_or(nobsnull_0_0, nobsnan)
-                    nexpnull_0 = tf.logical_or(nexpnull_0_0, nexpnan)
-                    nobsnull = tf.logical_or(nobsnull_0, nexpnull_0)
+                    nobsnull = tf.logical_or(nobsnull_0, nobsnan)
+                    nexpnull = tf.logical_or(nexpnull_0, nexpnan)
+
                     nobssafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nobs)
-                    nexpsafe = tf.where(nobsnull, tf.ones_like(self.nobs), nexp)
+                    ndiffsafe = tf.where(
+                        nexpnull, tf.zeros_like(self.nobs), nexp - self.nobs
+                    )
 
                     ln = 0.5 * tf.reduce_sum(
-                        (nexpsafe - nobssafe) ** 2 / tf.stop_gradient(nobssafe), axis=-1
+                        ndiffsafe**2 / tf.stop_gradient(nobssafe), axis=-1
                     )
                 else:
                     ln = 0.5 * tf.reduce_sum(

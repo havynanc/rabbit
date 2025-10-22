@@ -753,6 +753,12 @@ def main():
                     variances=tf.linalg.diag_part(ifitter.cov),
                     hist_name="parms_prefit",
                 )
+                if args.toysSystRandomize == "bayesian":
+                    ws.add_parms_hist(
+                        values=ifitter.x0,
+                        variances=tf.linalg.diag_part(ifitter.cov),
+                        hist_name="parms_gen",
+                    )
 
                 if args.saveHists:
                     save_observed_hists(args, models, ifitter, ws)
@@ -791,6 +797,10 @@ def main():
         logger.debug(f"{t0:.2f} seconds for prefit")
         logger.debug(f"{t1:.2f} seconds for fit")
         logger.debug(f"{t2:.2f} seconds for postfit")
+
+    # print('ifitter.x', ifitter.x.numpy())
+    # print('ifitter.theta0', ifitter.theta0.numpy())
+    # print('ifitter.x0', ifitter.x0.numpy())
 
 
 if __name__ == "__main__":
