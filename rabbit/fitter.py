@@ -415,6 +415,7 @@ class Fitter:
         #         )
         #     )
         self.x.assign(tf.one_hot(12, 73, dtype=tf.float64))
+        # self.x.assign(tf.zeros(73, dtype=tf.float64))
         self.x0 = tf.identity(self.x)
 
         if self.binByBinStat:
@@ -448,6 +449,7 @@ class Fitter:
         #     tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
         # )
         self.theta0.assign(tf.one_hot(12, 73, dtype=tf.float64))
+        # self.theta0.assign(tf.zeros(73, dtype=tf.float64))
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
                 # FIXME this is only valid for beta0=beta=1 (but this should always be the case when throwing toys)
@@ -1235,6 +1237,16 @@ class Fitter:
                                     (sbeta * (self.nobs - nexp_profile) + nobs0 * beta0)
                                     / denomsafe,
                                 )
+                                # temporary thing to save histogram of BBL params
+                                import matplotlib.pyplot as plt
+
+                                plt.hist(beta.numpy(), bins=100)
+                                plt.yscale("log")
+                                plt.ylabel("count")
+                                plt.xlabel("beta")
+                                plt.savefig("beta_hist.png")
+                                exit()
+                                # end of temporary thing
                             else:
                                 beta = (
                                     sbeta * (self.nobs - nexp_profile) + nobs0 * beta0
