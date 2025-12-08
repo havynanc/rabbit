@@ -268,6 +268,8 @@ def make_plots(
     axes_combinations = all_axes_names[:]
     # make lower dimensional combinations of axes
     for n in range(2, len(all_axes_names) + 1):
+        if n > 2:  # hack to only go up to 2d combinations
+            continue
         axes_combinations += [k for k in itertools.combinations(all_axes_names, n)]
 
     for axes_names in axes_combinations:

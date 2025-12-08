@@ -487,7 +487,20 @@ def fit(args, fitter, ws, dofit=True):
     else:
         if dofit:
             fitter.minimize()
-
+        # import matplotlib.pyplot as plt
+        # plt.hist(fitter.beta.numpy(), bins=100)
+        # plt.yscale("log")
+        # plt.ylabel("count")
+        # plt.xlabel("beta")
+        # plt.savefig("beta_hist_postfit.png")
+        # plt.clf()
+        # plt.hist(fitter.beta0.numpy(), bins=100)
+        # plt.yscale("log")
+        # plt.ylabel("count")
+        # plt.xlabel("beta0")
+        # plt.savefig("beta0_hist_postfit.png")
+        # plt.clf()
+        # exit()
         # compute the covariance matrix and estimated distance to minimum
 
         if not args.noHessian:

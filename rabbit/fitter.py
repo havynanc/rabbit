@@ -395,26 +395,39 @@ class Fitter:
             self.set_blinding_offsets(False)
 
     def bayesassign(self):
+        std = 0.3 * np.ones(1)
+        # std[0] = 0.05
         # FIXME use theta0 as the mean and constraintweight to scale the width
-        # if self.npoi == 0:
-        #     self.x.assign(
-        #         self.theta0
-        #         + tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
-        #     )
-        # else:
-        #     self.x.assign(
-        #         tf.concat(
-        #             [
-        #                 self.xpoidefault,
-        #                 self.theta0
-        #                 + tf.random.normal(
-        #                     shape=self.theta0.shape, dtype=self.theta0.dtype
-        #                 ),
-        #             ],
-        #             axis=0,
-        #         )
-        #     )
-        self.x.assign(tf.one_hot(12, 73, dtype=tf.float64))
+        if self.npoi == 0:
+            self.x.assign(
+                self.theta0
+                + tf.random.normal(
+                    shape=self.theta0.shape, stddev=std, dtype=self.theta0.dtype
+                )
+            )
+        else:
+            self.x.assign(
+                tf.concat(
+                    [
+                        self.xpoidefault,
+                        self.theta0
+                        + tf.random.normal(
+                            shape=self.theta0.shape, stddev=std, dtype=self.theta0.dtype
+                        ),
+                    ],
+                    axis=0,
+                )
+            )
+        # self.x.assign(tf.one_hot(12+24+24, 73, dtype=tf.float64))
+        # temp = np.zeros(73)
+        # temp[1+10] = 0.5
+        # temp[1+11] = 0.75
+        # temp[1+10+24] = -0.5
+        # temp[1+11+24] = -0.25
+        # temp[1+10+24+24] = 0.8
+        # temp[1+11+24+24] = 0.9
+        # self.x.assign(tf.constant(temp, dtype=tf.float64))
+        # self.x.assign(tf.concat([tf.zeros(1, dtype=tf.float64), tf.one_hot(11, 24, dtype=tf.float64), tf.one_hot(11, 24, dtype=tf.float64), tf.one_hot(11, 24, dtype=tf.float64)], axis=0))
         # self.x.assign(tf.zeros(73, dtype=tf.float64))
         self.x0 = tf.identity(self.x)
 
@@ -444,11 +457,24 @@ class Fitter:
                 )
 
     def frequentistassign(self):
+        std = 0.3 * np.ones(73)
+        std[0] = 0.05 * 100 / 91.1876
         # FIXME use theta as the mean and constraintweight to scale the width
-        # self.theta0.assign(
-        #     tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
-        # )
-        self.theta0.assign(tf.one_hot(12, 73, dtype=tf.float64))
+        self.theta0.assign(
+            tf.random.normal(
+                shape=self.theta0.shape, stddev=std, dtype=self.theta0.dtype
+            )
+        )
+        # self.theta0.assign(tf.one_hot(12+24+24, 73, dtype=tf.float64))
+        # temp = np.zeros(73)
+        # temp[1+10] = 0.5
+        # temp[1+11] = 0.75
+        # temp[1+10+24] = -0.5
+        # temp[1+11+24] = -0.25
+        # temp[1+10+24+24] = 0.8
+        # temp[1+11+24+24] = 0.9
+        # self.theta0.assign(tf.constant(temp, dtype=tf.float64))
+        # self.theta0.assign(tf.concat([tf.zeros(1, dtype=tf.float64), tf.one_hot(11, 24, dtype=tf.float64), tf.one_hot(11, 24, dtype=tf.float64), tf.one_hot(11, 24, dtype=tf.float64)], axis=0))
         # self.theta0.assign(tf.zeros(73, dtype=tf.float64))
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
@@ -673,7 +699,11 @@ class Fitter:
                 ),
             )
             impacts_grouped_syst = tf.transpose(impacts_grouped_syst)
+            print(tf.shape(impacts_grouped_syst))
+            print(tf.shape(impacts_grouped))
             impacts_grouped = tf.concat([impacts_grouped_syst, impacts_grouped], axis=1)
+            print(tf.shape(impacts_grouped))
+            # exit()
 
         return impacts, impacts_grouped
 
@@ -1186,6 +1216,8 @@ class Fitter:
     def _compute_yields_with_beta(self, profile=True, compute_norm=False, full=True):
         nexp, norm = self._compute_yields_noBBB(compute_norm, full=full)
 
+        # print('A')
+        # print(self.binByBinStat)
         if self.binByBinStat:
             if profile:
                 # analytic solution for profiled barlow-beeston lite parameters for each combination
@@ -1205,10 +1237,28 @@ class Fitter:
                         abeta = nexp_profile**2
                         bbeta = kstat * nobs0 - nexp_profile * self.nobs
                         cbeta = -kstat * nobs0 * beta0
-                        beta = (
-                            0.5
-                            * (-bbeta + tf.sqrt(bbeta**2 - 4.0 * abeta * cbeta))
-                            / abeta
+                        abeta_safe = tf.where(
+                            tf.equal(abeta, 0), tf.ones_like(abeta), abeta
+                        )
+                        discrim = bbeta**2 - 4.0 * abeta * cbeta
+                        discrim_safe = tf.where(
+                            tf.math.less(discrim, 0), tf.ones_like(abeta), discrim
+                        )
+                        fill_zero_0 = tf.math.logical_or(
+                            tf.equal(abeta, 0), tf.math.less(discrim, 0)
+                        )
+                        fill_zero = tf.logical_or(
+                            tf.equal(self.nexpnom, 0), fill_zero_0
+                        )
+                        # beta = (
+                        #     0.5
+                        #     * (-bbeta + tf.sqrt(bbeta**2 - 4.0 * abeta * cbeta))
+                        #     / abeta
+                        # )
+                        beta = tf.where(
+                            fill_zero,
+                            tf.ones_like(abeta),
+                            (0.5 * (-bbeta + tf.sqrt(discrim_safe)) / abeta_safe),
                         )
                         beta = tf.where(betamask, beta0, beta)
                     elif self.binByBinStatType == "normal":
@@ -1231,21 +1281,31 @@ class Fitter:
                                 denomsafe = tf.where(
                                     tf.equal(denom, 0), tf.ones_like(denom), denom
                                 )
+                                # null_or_unsafe = tf.logical_or(tf.equal(denom, 0), tf.less(nexp, 10000000000))
                                 beta = tf.where(
                                     tf.equal(denom, 0),
                                     tf.zeros_like(denomsafe),
                                     (sbeta * (self.nobs - nexp_profile) + nobs0 * beta0)
                                     / denomsafe,
                                 )
-                                # temporary thing to save histogram of BBL params
-                                import matplotlib.pyplot as plt
+                                # print('how many nexp are 0')
+                                # print(np.sum(tf.equal(nexp, 0).numpy()))
+                                # for b in beta.numpy():
+                                #     if b == 0.0:
+                                #         continue
+                                #     print(b)
+                                # exit()
+                                # print('B')
 
-                                plt.hist(beta.numpy(), bins=100)
-                                plt.yscale("log")
-                                plt.ylabel("count")
-                                plt.xlabel("beta")
-                                plt.savefig("beta_hist.png")
-                                exit()
+                                # temporary thing to save histogram of BBL params
+                                # import matplotlib.pyplot as plt
+
+                                # plt.hist(beta.numpy(), bins=100)
+                                # plt.yscale("log")
+                                # plt.ylabel("count")
+                                # plt.xlabel("beta")
+                                # plt.savefig("beta_hist.png")
+                                # exit()
                                 # end of temporary thing
                             else:
                                 beta = (
@@ -1282,6 +1342,7 @@ class Fitter:
             else:
                 beta = self.beta
 
+            # print('C')
             # Add dummy tensor to allow convenient differentiation by beta even when profiling
             beta = beta + self.ubeta
 
@@ -1299,6 +1360,17 @@ class Fitter:
                 sbeta = tf.sqrt(varbeta)
                 nexpnorm = nexp[..., None]
                 nexp = nexp + sbeta * betasel
+                # counter=0
+                # for n, s, bs in zip(nexp.numpy(), sbeta.numpy(), betasel.numpy()):
+                #     if n == 0.0 or bs == 0.0:
+                #         continue
+                #     print('nexp', n)
+                #     print('sbeta', s)
+                #     print('betasel', bs)
+                #     print('')
+                #     if counter > 10:
+                #         break
+                #     counter = counter + 1
                 if compute_norm:
                     # distribute the change in yields proportionally across processes
                     norm = (
@@ -1581,6 +1653,14 @@ class Fitter:
             compute_norm=False,
             full=False,
         )
+        # import matplotlib.pyplot as plt
+
+        # plt.hist(beta.numpy(), bins=100)
+        # plt.yscale("log")
+        # plt.ylabel("count")
+        # plt.xlabel("beta")
+        # plt.savefig("beta_hist_nll.png")
+        # plt.clf()
 
         nexp = nexpfullcentral
 
@@ -1616,12 +1696,14 @@ class Fitter:
 
                     nobsnull_0 = tf.equal(self.nobs, tf.zeros_like(self.nobs))
                     nexpnull_0 = tf.equal(nexp, tf.zeros_like(nexp))
+                    # nexpnull_0 = tf.less(nexp, 1000)
                     nobsnan = tf.logical_not(tf.math.is_finite(self.nobs))
                     nexpnan = tf.logical_not(tf.math.is_finite(nexp))
                     nobsnull = tf.logical_or(nobsnull_0, nobsnan)
                     nexpnull = tf.logical_or(nexpnull_0, nexpnan)
 
                     nobssafe = tf.where(nobsnull, tf.ones_like(self.nobs), self.nobs)
+                    # nexpsafe = tf.where(nexpnull, tf.ones_like(nexp), nexp)
                     ndiffsafe = tf.where(
                         nexpnull, tf.zeros_like(self.nobs), nexp - self.nobs
                     )
@@ -1795,6 +1877,9 @@ class Fitter:
             def scipy_loss(xval):
                 self.x.assign(xval)
                 val, grad = self.loss_val_grad()
+                # print('xval', xval)
+                # print('val', val)
+                # print('grad', grad)
                 return val.__array__(), grad.__array__()
 
             def scipy_hessp(xval, pval):
@@ -1840,6 +1925,7 @@ class Fitter:
             except Exception as ex:
                 # minimizer could have called the loss or hessp functions with "random" values, so restore the
                 # state from the end of the last iteration before the exception
+                # print('is the exception here')
                 xval = callback.xval
                 logger.debug(ex)
             else:
