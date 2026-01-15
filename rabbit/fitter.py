@@ -453,10 +453,10 @@ class Fitter:
     def set_nobs(self, values, variances=None):
         if self.chisqFit:
             # covariance from data stat
-            if tf.math.reduce_any(values <= 0).numpy():
-                raise RuntimeError(
-                    "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
-                )
+            # if tf.math.reduce_any(values <= 0).numpy():
+            #     raise RuntimeError(
+            #         "Bins in 'nobs <= 0' encountered, chi^2 fit can not be performed."
+            #     )
             self.varnobs.assign(values if variances is None else variances)
 
         self.nobs.assign(values)
@@ -557,7 +557,9 @@ class Fitter:
     def frequentistassign(self):
         # FIXME use theta as the mean and constraintweight to scale the width
         self.theta0.assign(
-            tf.random.normal(shape=self.theta0.shape, dtype=self.theta0.dtype)
+            tf.random.normal(
+                shape=self.theta0.shape, stddev=0.3, dtype=self.theta0.dtype
+            )
         )
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
@@ -1950,7 +1952,12 @@ class Fitter:
         nexp = nexpfullcentral
 
         if self.chisqFit:
-            ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / self.varnobs, axis=-1)
+            varnobsnull = tf.equal(self.varnobs, tf.zeros_like(self.varnobs))
+            varnobssafe = tf.where(
+                varnobsnull, tf.ones_like(self.varnobs), self.varnobs
+            )
+            # ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / self.varnobs, axis=-1)
+            ln = 0.5 * tf.reduce_sum((nexp - self.nobs) ** 2 / varnobssafe, axis=-1)
         elif self.covarianceFit:
             # Solve the system without inverting
             residual = tf.reshape(self.nobs - nexp, [-1, 1])  # chi2 residual
