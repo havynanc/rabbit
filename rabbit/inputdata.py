@@ -90,6 +90,10 @@ class FitInputData:
             else:
                 self.norm = maketensor(f["hnorm"])
                 self.logk = maketensor(f["hlogk"])
+            if "hbetavariations" in f.keys():
+                self.betavar = maketensor(f["hbetavariations"])
+            else:
+                self.betavar = None
 
             # infer some metadata from loaded information
             self.dtype = self.data_obs.dtype

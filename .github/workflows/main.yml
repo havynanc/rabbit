@@ -226,7 +226,7 @@ jobs:
       - name: nominal fit
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/ --postfix composite
-          -t 0 --unblind '.*' --doImpacts --globalImpacts
+          -t -1 0 --unblind '.*' --doImpacts --globalImpacts
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           --computeHistCov --computeHistImpacts --computeVariations
           --compositeMapping -m Project ch1 a -m Project ch1 b 
@@ -234,12 +234,12 @@ jobs:
       - name: nominal fit blinded
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor.hdf5 -o $RABBIT_OUTDIR/
-          -t 0 --postfix blinded --doImpacts --globalImpacts
+          -t 0 --postfix blinded --setConstraintMinimum bkg_2_norm 0.5 --doImpacts --globalImpacts
 
       - name: sparse tensor fit 
         run: >- 
           rabbit_fit.py $RABBIT_OUTDIR/test_tensor_sparse.hdf5 -o $RABBIT_OUTDIR/ --postfix sparse
-          -t -0 --noBinByBinStat --doImpacts --globalImpacts --computeVariations
+          -t 0 --noBinByBinStat --doImpacts --globalImpacts --computeVariations
           --saveHists --saveHistsPerProcess --computeHistErrors --computeHistErrorsPerProcess
           -m Project ch1 a -m Project ch1 b
 

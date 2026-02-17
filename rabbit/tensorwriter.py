@@ -7,7 +7,7 @@ import numpy as np
 
 from rabbit import common, h5pyutils
 
-from wums import ioutils, logging, output_tools  # isort: skip
+from wums import ioutils, logging  # isort: skip
 
 logger = logging.child_logger(__name__)
 
@@ -55,6 +55,7 @@ class TensorWriter:
         self.dict_logkhalfdiff = {}  # [channel][proc][syst]
         self.dict_logkavg_indices = {}
         self.dict_logkhalfdiff_indices = {}
+        self.dict_beta_variations = {}  # [channel][syst][process]
 
         self.clipSystVariations = False
         if self.clipSystVariations > 0.0:
@@ -160,6 +161,7 @@ class TensorWriter:
         self.nbinschan[name] = ibins
         self.dict_norm[name] = {}
         self.dict_sumw2[name] = {}
+        self.dict_beta_variations[name] = {}
 
         # add masked channels last and not masked channels first
         this_channel = {"axes": [a for a in axes], "masked": masked, "flow": flow}
@@ -184,13 +186,11 @@ class TensorWriter:
             channel_axes = self.channels[channel]["axes"]
 
             if not all(np.allclose(a, axes[i]) for i, a in enumerate(channel_axes)):
-                raise RuntimeError(
-                    f"""
+                raise RuntimeError(f"""
                     Histogram axes different have different edges from channel axes of channel {channel}
                     \nHistogram axes: {[a.edges for a in axes]}
                     \nChannel axes: {[a.edges for a in channel_axes]}
-                    """
-                )
+                    """)
         else:
             shape_in = h.shape
             shape_this = tuple([len(a) for a in self.channels[channel]["axes"]])
@@ -392,6 +392,57 @@ class TensorWriter:
             var_name_out, add_to_data_covariance=add_to_data_covariance, **kargs
         )
 
+    def add_beta_variations(
+        self,
+        h,
+        process,
+        source_channel,
+        dest_channel,
+    ):
+        """
+        Adds a template variation in the destination channel that is correlated with the beta variation in the source channel for a given process
+        h: must be a histogram with the axes of the source channel and destiation channel.
+        """
+        if self.sparse:
+            raise NotImplementedError("Sparse implementation not yet implemented")
+
+        if source_channel not in self.channels.keys():
+            raise RuntimeError(f"Channel {source_channel} not known!")
+        if dest_channel not in self.channels.keys():
+            raise RuntimeError(f"Channel {dest_channel} not known!")
+        if not self.channels[dest_channel]["masked"]:
+            raise RuntimeError(
+                f"Beta variations can only be applied to masked channels"
+            )
+
+        norm = self.dict_norm[dest_channel][process]
+
+        source_axes = self.channels[source_channel]["axes"]
+        dest_axes = self.channels[dest_channel]["axes"]
+
+        source_axes_names = [a.name for a in source_axes]
+        dest_axes_names = [a.name for a in dest_axes]
+
+        for a in source_axes:
+            if a.name not in h.axes.name:
+                raise RuntimeError(
+                    f"Axis {a.name} not found in histogram h with {h.axes.name}"
+                )
+        for a in dest_axes:
+            if a.name not in h.axes.name:
+                raise RuntimeError(
+                    f"Axis {a.name} not found in histogram h with {h.axes.name}"
+                )
+
+        flow = self.channels[dest_channel]["flow"]
+        variation = h.project(*dest_axes_names, *source_axes_names).values(flow=flow)
+        variation = variation.reshape((*norm.shape, -1))
+
+        if source_channel not in self.dict_beta_variations[dest_channel].keys():
+            self.dict_beta_variations[dest_channel][source_channel] = {}
+
+        self.dict_beta_variations[dest_channel][source_channel][process] = variation
+
     def get_logk(self, syst, norm, kfac=1.0, systematic_type=None):
         if not np.all(np.isfinite(syst)):
             raise RuntimeError(
@@ -485,7 +536,7 @@ class TensorWriter:
             for group in groups:
                 self.dict_systgroups[group].add(name)
 
-    def write(self, outfolder="./", outfilename="rabbit_input.hdf5", args={}):
+    def write(self, outfolder="./", outfilename="rabbit_input.hdf5", meta_data_dict={}):
 
         if self.signals.intersection(self.bkgs):
             raise RuntimeError(
@@ -534,6 +585,8 @@ class TensorWriter:
 
         if self.symmetric_tensor:
             logger.info("No asymmetric systematics - write fully symmetric tensor")
+
+        has_beta_variations = False
 
         ibin = 0
         if self.sparse:
@@ -714,6 +767,7 @@ class TensorWriter:
             else:
                 logk = np.zeros([nbinsfull, nproc, 2, nsyst], self.dtype)
 
+            beta_variations = np.zeros([nbinsfull, nbins, nproc], self.dtype)
             for chan in self.channels.keys():
                 nbinschan = self.nbinschan[chan]
                 dict_norm_chan = self.dict_norm[chan]
@@ -745,6 +799,33 @@ class TensorWriter:
                                     dict_logkhalfdiff_proc[syst]
                                 )
 
+                    for (
+                        source_channel,
+                        source_channel_dict,
+                    ) in self.dict_beta_variations[chan].items():
+                        if proc in source_channel_dict:
+                            # find the bins of the source channel
+                            ibin_start = 0
+                            for c, nb in self.nbinschan.items():
+                                if self.channels[c]["masked"]:
+                                    continue  # masked channels can not be source channels
+                                if c == source_channel:
+                                    ibin_end = ibin_start + nb
+                                    break
+                                else:
+                                    ibin_start += nb
+                            else:
+                                raise RuntimeError(
+                                    f"Did not find source channel {source_channel} in list of channels {[k for k in self.nbinschan.keys()]}"
+                                )
+
+                            beta_vars = source_channel_dict[proc]
+                            beta_variations[
+                                ibin : ibin + nbinschan, ibin_start:ibin_end, iproc
+                            ] = beta_vars
+
+                            has_beta_variations = True
+
                 ibin += nbinschan
 
         if self.data_covariance is None and (
@@ -772,17 +853,18 @@ class TensorWriter:
         logger.info(f"Write output file {outpath}")
         f = h5py.File(outpath, rdcc_nbytes=self.chunkSize, mode="w")
 
-        # propagate meta info into result file
-        meta = {
-            "meta_info": output_tools.make_meta_info_dict(
-                args=args, wd=common.base_dir
-            ),
-            "channel_info": self.channels,
-            "symmetric_tensor": self.symmetric_tensor,
-            "systematic_type": self.systematic_type,
-        }
+        if meta_data_dict is not None:
+            meta_data_dict.update(
+                {
+                    "channel_info": self.channels,
+                    "symmetric_tensor": self.symmetric_tensor,
+                    "systematic_type": self.systematic_type,
+                }
+            )
+            if "meta_info" not in meta_data_dict:
+                meta_data_dict["meta_info"] = {}
 
-        ioutils.pickle_dump_h5py("meta", meta, f)
+        ioutils.pickle_dump_h5py("meta", meta_data_dict, f)
 
         noiidxs = self.get_noiidxs()
         systsnoconstraint = self.get_systsnoconstraint()
@@ -915,6 +997,13 @@ class TensorWriter:
                 logk, f, "hlogk", maxChunkBytes=self.chunkSize
             )
             logk = None
+
+            if has_beta_variations:
+
+                nbytes += h5pyutils.writeFlatInChunks(
+                    beta_variations, f, "hbetavariations", maxChunkBytes=self.chunkSize
+                )
+                beta_variations = None
 
         logger.info(f"Total raw bytes in arrays = {nbytes}")
 

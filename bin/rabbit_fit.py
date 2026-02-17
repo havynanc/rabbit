@@ -150,6 +150,12 @@ def make_parser():
         help="Specify result from external postfit file",
     )
     parser.add_argument(
+        "--noPostfitProfileBB",
+        default=False,
+        action="store_true",
+        help="Do not profile the bin-by-bin parameters in the postfit (e.g. if parameters are loaded from another fit using --externalPostfit and/or no data is available to be profiled).",
+    )
+    parser.add_argument(
         "--doImpacts",
         default=False,
         action="store_true",
@@ -276,41 +282,46 @@ def fit(args, fitter, ws, dofit=True):
 
     if args.externalPostfit is not None:
         fitter.load_fitresult(args.externalPostfit, args.externalPostfitResult)
-    else:
-        if dofit:
-            cb = fitter.minimize()
 
-            if cb is not None:
-                ws.add_loss_time_hist(cb.loss_history, cb.time_history)
+    if dofit:
+        cb = fitter.minimize()
 
-        if not args.noHessian:
-            # compute the covariance matrix and estimated distance to minimum
+        # force profiling of beta with final parameter values
+        # TODO avoid the extra calculation and jitting if possible since the relevant calculation
+        # usually would have been done during the minimization
+        if fitter.binByBinStat and not args.noPostfitProfileBB:
+            fitter._profile_beta()
 
-            val, grad, hess = fitter.loss_val_grad_hess()
-            edmval, cov = edmval_cov(grad, hess)
+        if cb is not None:
+            ws.add_loss_time_hist(cb.loss_history, cb.time_history)
 
-            logger.info(f"edmval: {edmval}")
+    if not args.noHessian:
+        # compute the covariance matrix and estimated distance to minimum
 
-            fitter.cov.assign(cov)
+        val, grad, hess = fitter.loss_val_grad_hess()
+        edmval, cov = edmval_cov(grad, hess)
+        logger.info(f"edmval: {edmval}")
 
-            del cov
+        fitter.cov.assign(cov)
 
-            if fitter.binByBinStat and fitter.diagnostics:
-                # This is the estimated distance to minimum with respect to variations of
-                # the implicit binByBinStat nuisances beta at fixed parameter values.
-                # It should be near-zero by construction as long as the analytic profiling is
-                # correct
-                _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
-                edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
-                logger.info(f"edmvalbeta: {edmvalbeta}")
+        del cov
 
-            if args.doImpacts:
-                ws.add_impacts_hists(*fitter.impacts_parms(hess))
+        if fitter.binByBinStat and fitter.diagnostics:
+            # This is the estimated distance to minimum with respect to variations of
+            # the implicit binByBinStat nuisances beta at fixed parameter values.
+            # It should be near-zero by construction as long as the analytic profiling is
+            # correct
+            _, gradbeta, hessbeta = fitter.loss_val_grad_hess_beta()
+            edmvalbeta, covbeta = edmval_cov(gradbeta, hessbeta)
+            logger.info(f"edmvalbeta: {edmvalbeta}")
 
-            del hess
+        if args.doImpacts:
+            ws.add_impacts_hists(*fitter.impacts_parms(hess))
 
-            if args.globalImpacts:
-                ws.add_global_impacts_hists(*fitter.global_impacts_parms())
+        del hess
+
+        if args.globalImpacts:
+            ws.add_global_impacts_hists(*fitter.global_impacts_parms())
 
     nllvalreduced = fitter.reduced_nll().numpy()
 
@@ -331,7 +342,7 @@ def fit(args, fitter, ws, dofit=True):
             "nllvalreduced": nllvalreduced,
             "ndfsat": ndfsat,
             "edmval": edmval,
-            "postfit_profile": args.externalPostfit is None,
+            "postfit_profile": not args.noPostfitProfileBB,
         }
     )
 
@@ -559,7 +570,7 @@ def main():
                             ifitter,
                             ws,
                             prefit=False,
-                            profile=args.externalPostfit is None,
+                            profile=not args.noPostfitProfileBB,
                         )
                 else:
                     fit_time.append(time.time())
