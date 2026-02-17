@@ -561,6 +561,13 @@ class Fitter:
                 shape=self.theta0.shape, stddev=0.3, dtype=self.theta0.dtype
             )
         )
+        # temp = tf.random.normal(
+        #            shape=self.theta0.shape, stddev=0.3, dtype=self.theta0.dtype
+        # )
+        # overwrite_indices = np.zeros(self.theta0.shape, dtype=bool)
+        # overwrite_indices[49:-24] = True
+        # self.theta0.assign(tf.where(overwrite_indices, tf.zeros_like(temp), temp))
+
         if self.binByBinStat:
             if self.binByBinStatType == "gamma":
                 # FIXME this is only valid for beta0=beta=1 (but this should always be the case when throwing toys)
