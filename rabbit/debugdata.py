@@ -49,9 +49,14 @@ class FitDebugData:
                 else:
                     data_obs_hist.variances()[...] = data_obs_hist.values()[...]
 
-            nominal_hist = hist.Hist(*axes, self.axis_procs, name=f"{channel}_nominal")
+            nominal_hist = hist.Hist(
+                *axes, self.axis_procs, name=f"{channel}_nominal", storage="Weight"
+            )
             nominal_hist.values()[...] = memoryview(
                 tf.reshape(self.indata.norm[ibin:stop, :], shape_norm)
+            )
+            nominal_hist.variances()[...] = memoryview(
+                tf.reshape(self.indata.sumw2[ibin:stop, :], shape_norm)
             )
 
             # TODO do these operations on logk in tensorflow instead of numpy to use
