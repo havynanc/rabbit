@@ -5,6 +5,37 @@ import numpy as np
 import tensorflow as tf
 
 
+def _active_axis_cells(indata, channel, proc_idx, selected_axes):
+    """Return occupied selected-axis coordinates for one channel process."""
+    info = indata.channel_info[channel]
+    channel_axes = info["axes"]
+    channel_shape = tuple(a.size for a in channel_axes)
+    start = info["start"]
+    stop = info["stop"]
+
+    if indata.sparse:
+        indices = indata.norm.indices.numpy()
+        values = indata.norm.values.numpy()
+        mask = (
+            (indices[:, 0] >= start)
+            & (indices[:, 0] < stop)
+            & (indices[:, 1] == proc_idx)
+            & (values != 0.0)
+        )
+        local_rows = indices[mask, 0] - start
+    else:
+        norm = indata.norm.numpy()[start:stop, proc_idx]
+        local_rows = np.flatnonzero(norm)
+
+    if len(local_rows) == 0:
+        return np.empty((0, len(selected_axes)), dtype=np.int32)
+
+    channel_coords = np.stack(np.unravel_index(local_rows, channel_shape), axis=-1)
+    channel_axis_names = [a.name for a in channel_axes]
+    axis_positions = [channel_axis_names.index(a.name) for a in selected_axes]
+    return np.unique(channel_coords[:, axis_positions], axis=0).astype(np.int32)
+
+
 class ParamModel:
 
     def __init__(self, indata, *args, **kwargs):
@@ -403,23 +434,31 @@ class AxisNormModel(ParamModel):
             int(np.where(indata.procs == p)[0][0]) for p in target_encoded
         ]
 
-        cell_shape = [a.size for a in self.requested_axes]
-        self.n_cell = int(np.prod(cell_shape))
-        self.npoi = len(self.proc_idxs) * self.n_cell
+        self.cell_shape = [a.size for a in self.requested_axes]
+        self.active_cells = [
+            _active_axis_cells(indata, channel, proc_idx, self.requested_axes)
+            for proc_idx in self.proc_idxs
+        ]
+        self.n_cells = [len(cells) for cells in self.active_cells]
+        self.npoi = sum(self.n_cells)
 
         names = []
-        for proc_encoded in target_encoded:
+        for proc_encoded, cells in zip(target_encoded, self.active_cells):
             proc_name = (
                 proc_encoded.decode()
                 if isinstance(proc_encoded, bytes)
                 else str(proc_encoded)
             )
-            for idxs in itertools.product(*[range(s) for s in cell_shape]):
+            for idxs in cells:
                 label = "_".join(
                     f"{a.name}{i}" for a, i in zip(self.requested_axes, idxs)
                 )
                 names.append(f"norm_{proc_name}_{label}".encode())
         self.params = np.array(names)
+        print(
+            f"AxisNormModel {channel}: {self.npoi} active parameters "
+            f"across {len(self.proc_idxs)} process(es)"
+        )
 
         self.npou = 0
         # Enforce non-negativity via x^2 (commented out) or softplus (current) applied inside compute()
@@ -460,12 +499,21 @@ class AxisNormModel(ParamModel):
                 [nbins_channel, self.indata.nproc], dtype=self.indata.dtype
             )
             if k == self.channel:
-                for i, proc_idx in enumerate(self.proc_idxs):
-                    ipoi = param[i * self.n_cell : (i + 1) * self.n_cell]
+                start = 0
+                for proc_idx, cells, n_cell in zip(
+                    self.proc_idxs, self.active_cells, self.n_cells
+                ):
+                    ipoi = param[start : start + n_cell]
+                    start += n_cell
                     # x^2
+                    cell_scaling = tf.tensor_scatter_nd_update(
+                        tf.ones(self.cell_shape, dtype=self.indata.dtype),
+                        cells,
+                        tf.square(ipoi),
+                    )
                     scaling = tf.reshape(
                         tf.broadcast_to(
-                            tf.reshape(tf.square(ipoi), reshape), shape_input
+                            tf.reshape(cell_scaling, reshape), shape_input
                         ),
                         [-1, 1],
                     )
@@ -586,8 +634,7 @@ class AxisExpModel(ParamModel):
                 )
         self.slope_axis_names = set(slope_names)
         self.slope_axes = [axis_by_name[n] for n in slope_names]
-        slope_shape = [a.size for a in self.slope_axes]
-        self.n_slope_groups = int(np.prod(slope_shape))
+        self.slope_shape = [a.size for a in self.slope_axes]
 
         if proc_spec == "all":
             target_encoded = list(indata.procs)
@@ -605,24 +652,43 @@ class AxisExpModel(ParamModel):
             int(np.where(indata.procs == p)[0][0]) for p in target_encoded
         ]
 
-        cell_shape = [a.size for a in self.cell_axes]
-        self.n_cell = int(np.prod(cell_shape))
-        self.npoi = len(self.proc_idxs) * (self.n_cell + self.n_slope_groups)
+        self.cell_shape = [a.size for a in self.cell_axes]
+        self.active_cells = [
+            _active_axis_cells(indata, channel, proc_idx, self.cell_axes)
+            for proc_idx in self.proc_idxs
+        ]
+        slope_positions = [cell_names.index(name) for name in slope_names]
+        self.active_slope_groups = [
+            np.unique(cells[:, slope_positions], axis=0).astype(np.int32)
+            if len(cells)
+            else np.empty((0, len(slope_positions)), dtype=np.int32)
+            for cells in self.active_cells
+        ]
+        self.n_cells = [len(cells) for cells in self.active_cells]
+        self.n_slope_groups = [len(groups) for groups in self.active_slope_groups]
+        self.npoi = sum(self.n_cells) + sum(self.n_slope_groups)
 
         names = []
-        for proc_encoded in target_encoded:
+        for proc_encoded, cells, slope_groups in zip(
+            target_encoded, self.active_cells, self.active_slope_groups
+        ):
             proc_name = (
                 proc_encoded.decode()
                 if isinstance(proc_encoded, bytes)
                 else str(proc_encoded)
             )
-            for idxs in itertools.product(*[range(s) for s in cell_shape]):
+            for idxs in cells:
                 label = "_".join(f"{a.name}{i}" for a, i in zip(self.cell_axes, idxs))
                 names.append(f"lnAmpl_{proc_name}_{label}".encode())
-            for idxs in itertools.product(*[range(s) for s in slope_shape]):
+            for idxs in slope_groups:
                 label = "_".join(f"{a.name}{i}" for a, i in zip(self.slope_axes, idxs))
                 names.append(f"slope_{proc_name}_{label}".encode())
         self.params = np.array(names)
+        print(
+            f"AxisExpModel {channel}: {sum(self.n_cells)} active amplitudes and "
+            f"{sum(self.n_slope_groups)} active slopes across "
+            f"{len(self.proc_idxs)} process(es)"
+        )
 
         # Normalized shape-axis bin centers in [0, 1]
         centers = np.asarray(axis_by_name[shape_axis].centers, dtype=np.float32)
@@ -662,12 +728,30 @@ class AxisExpModel(ParamModel):
                 [nbins_channel, self.indata.nproc], dtype=self.indata.dtype
             )
             if k == self.channel:
-                for i, proc_idx in enumerate(self.proc_idxs):
-                    stride = self.n_cell + self.n_slope_groups
-                    a_poi = param[i * stride : i * stride + self.n_cell]
-                    b_poi = param[i * stride + self.n_cell : (i + 1) * stride]
-                    a = tf.reshape(a_poi, self.cell_reshape)
-                    b = tf.reshape(b_poi, self.slope_cell_reshape)
+                start = 0
+                for proc_idx, cells, slope_groups, n_cell, n_slope in zip(
+                    self.proc_idxs,
+                    self.active_cells,
+                    self.active_slope_groups,
+                    self.n_cells,
+                    self.n_slope_groups,
+                ):
+                    a_poi = param[start : start + n_cell]
+                    start += n_cell
+                    b_poi = param[start : start + n_slope]
+                    start += n_slope
+                    a_cells = tf.tensor_scatter_nd_update(
+                        tf.zeros(self.cell_shape, dtype=self.indata.dtype),
+                        cells,
+                        a_poi,
+                    )
+                    b_cells = tf.tensor_scatter_nd_update(
+                        tf.zeros(self.slope_shape, dtype=self.indata.dtype),
+                        slope_groups,
+                        b_poi,
+                    )
+                    a = tf.reshape(a_cells, self.cell_reshape)
+                    b = tf.reshape(b_cells, self.slope_cell_reshape)
                     scaling = tf.reshape(
                         tf.broadcast_to(tf.exp(a + b * x_reshaped), self.full_shape),
                         [-1, 1],

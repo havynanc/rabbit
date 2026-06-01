@@ -1326,17 +1326,16 @@ class Fitter:
             # the per-entry syst variation and the per-(bin, proc) POI
             # scaling rnorm. The sparsity pattern is unchanged from
             # self.indata.norm, so with_values lets us reuse the indices.
+            rnorm_sparse = tf.gather_nd(rnorm, self.indata.norm.indices)
             if self.indata.systematic_type == "log_normal":
                 # values[i] = norm[i] * exp(logsnorm[i]) * rnorm[bin, proc]
                 snormnorm_sparse = self.indata.norm.with_values(
-                    tf.exp(logsnorm) * self.indata.norm.values
+                    tf.exp(logsnorm) * self.indata.norm.values * rnorm_sparse
                 )
-                snormnorm_sparse = snormnorm_sparse * rnorm
             else:  # "normal"
                 # values[i] = norm[i] * rnorm[bin, proc] + logsnorm[i]
-                snormnorm_sparse = self.indata.norm * rnorm
-                snormnorm_sparse = snormnorm_sparse.with_values(
-                    snormnorm_sparse.values + logsnorm
+                snormnorm_sparse = self.indata.norm.with_values(
+                    self.indata.norm.values * rnorm_sparse + logsnorm
                 )
 
             if not full and self.indata.nbinsmasked:
