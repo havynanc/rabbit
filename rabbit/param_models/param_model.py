@@ -134,6 +134,23 @@ class CompositeParamModel(ParamModel):
         rnorm = functools.reduce(lambda a, b: a * b, results)
         return rnorm
 
+    def analytical_jacobian_block(self, param, normcentral):
+        start = 0
+        results = []
+        for m in self.param_models:
+            sub_param = param[start : start + m.nparams]
+            if hasattr(m, "analytical_jacobian_block"):
+                results.append(m.analytical_jacobian_block(sub_param, normcentral))
+            start += m.nparams
+        if len(results) > 0:
+            return tf.concat(results, axis=2)
+        else:
+            first_model = self.param_models[0]
+            return tf.zeros(
+                [tf.shape(normcentral)[0], first_model.indata.nproc, 0],
+                dtype=first_model.indata.dtype,
+            )
+
 
 class Ones(ParamModel):
     """
@@ -442,6 +459,34 @@ class AxisNormModel(ParamModel):
         self.n_cells = [len(cells) for cells in self.active_cells]
         self.npoi = sum(self.n_cells)
 
+        # Precompute flat mapping arrays from channel bins to cell coordinates
+        shape_input = [a.size for a in axes]
+        nbins_channel = int(np.prod(shape_input))
+        bin_coords = np.stack(
+            np.unravel_index(np.arange(nbins_channel), shape_input), axis=-1
+        )
+        channel_axis_names = [a.name for a in axes]
+        cell_axis_positions = [
+            channel_axis_names.index(a.name) for a in self.requested_axes
+        ]
+
+        self.bin_to_cells = []
+        for cells in self.active_cells:
+            n_cell = len(cells)
+            if n_cell == 0:
+                self.bin_to_cells.append(np.full(nbins_channel, 0, dtype=np.int32))
+                continue
+            if len(self.cell_shape) > 1:
+                active_flat = np.ravel_multi_index(cells.T, self.cell_shape)
+                bin_cell_coords = bin_coords[:, cell_axis_positions]
+                bin_flat = np.ravel_multi_index(bin_cell_coords.T, self.cell_shape)
+            else:
+                active_flat = cells[:, 0]
+                bin_flat = bin_coords[:, cell_axis_positions[0]]
+            lookup = np.full(np.prod(self.cell_shape), n_cell, dtype=np.int32)
+            lookup[active_flat] = np.arange(n_cell)
+            self.bin_to_cells.append(lookup[bin_flat])
+
         names = []
         for proc_encoded, cells in zip(target_encoded, self.active_cells):
             proc_name = (
@@ -512,9 +557,7 @@ class AxisNormModel(ParamModel):
                         tf.square(ipoi),
                     )
                     scaling = tf.reshape(
-                        tf.broadcast_to(
-                            tf.reshape(cell_scaling, reshape), shape_input
-                        ),
+                        tf.broadcast_to(tf.reshape(cell_scaling, reshape), shape_input),
                         [-1, 1],
                     )
                     # softplus
@@ -528,6 +571,56 @@ class AxisNormModel(ParamModel):
             rnorms.append(irnorm)
 
         return tf.concat(rnorms, axis=0)
+
+    def analytical_jacobian_block(self, param, normcentral):
+        nbins_all = tf.shape(normcentral)[0]
+        nproc = self.indata.nproc
+        info = self.indata.channel_info[self.channel]
+        start, stop = info["start"], info["stop"]
+
+        parts = []
+        param_start = 0
+        for i, (proc_idx, n_cell) in enumerate(zip(self.proc_idxs, self.n_cells)):
+            if n_cell > 0:
+                ipoi = param[param_start : param_start + n_cell]
+                param_start += n_cell
+
+                n_bin = normcentral[start:stop, proc_idx]
+                ipoi_padded = tf.concat([ipoi, [1.0]], axis=0)
+                ipoi_bin = tf.gather(ipoi_padded, self.bin_to_cells[i])
+
+                # Avoid division by zero when parameter is 0.0
+                deriv_bin = (
+                    2.0
+                    * n_bin
+                    / tf.where(
+                        tf.equal(ipoi_bin, 0.0), tf.ones_like(ipoi_bin), ipoi_bin
+                    )
+                )
+
+                # Check active cells: self.bin_to_cells holds the parameter index (0 to n_cell-1)
+                # for active cells, and exactly n_cell for inactive cells.
+                # Therefore, is_active is True if the value is less than n_cell.
+                is_active = tf.less(self.bin_to_cells[i], n_cell)
+                deriv_bin = tf.where(is_active, deriv_bin, tf.zeros_like(deriv_bin))
+
+                one_hot_cell = tf.one_hot(
+                    self.bin_to_cells[i], n_cell, dtype=self.indata.dtype
+                )
+                J_proc = deriv_bin[:, None] * one_hot_cell
+
+                one_hot_proc = tf.one_hot(proc_idx, nproc, dtype=self.indata.dtype)
+                J_proc_full = J_proc[:, None, :] * one_hot_proc[None, :, None]
+
+                J_padded = tf.pad(
+                    J_proc_full, [[start, nbins_all - stop], [0, 0], [0, 0]]
+                )
+                parts.append(J_padded)
+
+        if len(parts) > 0:
+            return tf.concat(parts, axis=2)
+        else:
+            return tf.zeros([nbins_all, nproc, 0], dtype=self.indata.dtype)
 
 
 class AxisExpModel(ParamModel):
@@ -659,9 +752,11 @@ class AxisExpModel(ParamModel):
         ]
         slope_positions = [cell_names.index(name) for name in slope_names]
         self.active_slope_groups = [
-            np.unique(cells[:, slope_positions], axis=0).astype(np.int32)
-            if len(cells)
-            else np.empty((0, len(slope_positions)), dtype=np.int32)
+            (
+                np.unique(cells[:, slope_positions], axis=0).astype(np.int32)
+                if len(cells)
+                else np.empty((0, len(slope_positions)), dtype=np.int32)
+            )
             for cells in self.active_cells
         ]
         self.n_cells = [len(cells) for cells in self.active_cells]

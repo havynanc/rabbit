@@ -1050,21 +1050,175 @@ class Fitter:
         # FIXME switch back to optimized version at some point?
 
         def compute_derivatives(dvars):
-            with tf.GradientTape(watch_accessed_variables=False) as t:
-                t.watch(dvars)
-                expected = self._compute_expected(
-                    fun_exp,
-                    inclusive=inclusive,
-                    profile=profile,
-                    full=full,
-                    need_observables=need_observables,
-                )
-                expected_flat = tf.reshape(expected, (-1,))
-            jacs = t.jacobian(
-                expected_flat,
-                dvars,
+            from rabbit.param_models.param_model import (
+                AxisNormModel,
+                CompositeParamModel,
             )
-            return expected, *jacs
+
+            nparams_model = self.param_model.nparams
+            axis_norm_mask = np.zeros(self.x.shape[0], dtype=bool)
+
+            if isinstance(self.param_model, CompositeParamModel):
+                start = 0
+                for m in self.param_model.param_models:
+                    if isinstance(m, AxisNormModel):
+                        axis_norm_mask[start : start + m.nparams] = True
+                    start += m.nparams
+            elif isinstance(self.param_model, AxisNormModel):
+                axis_norm_mask[:nparams_model] = True
+
+            has_axis_norm = np.any(axis_norm_mask)
+
+            if has_axis_norm:
+                axis_norm_indices = np.where(axis_norm_mask)[0]
+                other_indices = np.where(~axis_norm_mask)[0]
+
+                axis_norm_params = tf.gather(self.x, axis_norm_indices)
+                other_params_val = tf.gather(self.x, other_indices)
+
+                watch_list = []
+                x_idx_in_dvars = -1
+                for idx, var in enumerate(dvars):
+                    if var is self.x:
+                        x_idx_in_dvars = idx
+                        watch_list.append(other_params_val)
+                    else:
+                        watch_list.append(var)
+
+                original_x = self.x
+
+                with tf.GradientTape(watch_accessed_variables=False) as t:
+                    t.watch(watch_list)
+
+                    x_reconstructed = tf.dynamic_stitch(
+                        [
+                            tf.constant(axis_norm_indices, dtype=tf.int32),
+                            tf.constant(other_indices, dtype=tf.int32),
+                        ],
+                        [tf.stop_gradient(axis_norm_params), other_params_val],
+                    )
+                    self.x = x_reconstructed
+
+                    expected = self._compute_expected(
+                        fun_exp,
+                        inclusive=inclusive,
+                        profile=profile,
+                        full=full,
+                        need_observables=need_observables,
+                    )
+                    expected_flat = tf.reshape(expected, (-1,))
+
+                self.x = original_x
+
+                jacs_other = t.jacobian(expected_flat, watch_list)
+
+                # Compute analytical Jacobian block for AxisNormModel
+                normcentral = self._compute_yields(
+                    inclusive=False, profile=profile, full=full
+                )
+                all_params = tf.concat([self.get_poi(), self.get_model_nui()], axis=0)
+                J_model = self.param_model.analytical_jacobian_block(
+                    all_params, normcentral
+                )
+
+                # Retrieve mapping from fun_exp or instance state
+                mapping = getattr(fun_exp, "__self__", None)
+                if mapping is None:
+                    mapping = getattr(self, "_current_mapping", None)
+
+                # Propagate analytical derivatives through mappings
+                def select_jacobian(term, J_model, inclusive=True):
+                    J = J_model[term.start : term.stop]
+                    if term.proc_idxs:
+                        J = tf.gather(J, indices=term.proc_idxs, axis=1)
+                    nproc_sel = tf.shape(J)[1]
+                    nparams = tf.shape(J)[2]
+                    J = tf.reshape(J, (*term.exp_shape, nproc_sel, nparams))
+                    if inclusive:
+                        J = tf.reduce_sum(J, axis=-2)
+                    if term.selections:
+                        J = (
+                            J[term.selections]
+                            if inclusive
+                            else J[term.selections + (slice(None),)]
+                        )
+                    if len(term.segment_ids):
+                        for i, s in term.segment_ids.items():
+                            J = tfh.segment_sum_along_axis(
+                                J, s, i, num_segments=term.num_segments[i]
+                            )
+                    if len(term.sum_idxs):
+                        J = tf.reduce_sum(J, axis=term.sum_idxs)
+                    return tf.reshape(J, [-1, nparams])
+
+                def propagate_jacobian(mapping, J_model, inclusive=True):
+                    if mapping is None:
+                        if inclusive:
+                            return tf.reduce_sum(J_model, axis=1)
+                        else:
+                            return tf.reshape(J_model, [-1, tf.shape(J_model)[2]])
+                    if hasattr(mapping, "mappings"):
+                        jacs = []
+                        for m in mapping.mappings:
+                            J_input = J_model
+                            if mapping.need_processes and not m.need_processes:
+                                J_input = tf.reduce_sum(J_input, axis=1, keepdims=True)
+                            jacs.append(
+                                propagate_jacobian(m, J_input, inclusive=inclusive)
+                            )
+                        return tf.concat(jacs, axis=0)
+                    elif hasattr(mapping, "term"):
+                        return select_jacobian(
+                            mapping.term,
+                            J_model,
+                            inclusive=inclusive
+                            and not getattr(mapping, "need_processes", False),
+                        )
+                    else:
+                        if inclusive:
+                            return tf.reduce_sum(J_model, axis=1)
+                        else:
+                            return tf.reshape(J_model, [-1, tf.shape(J_model)[2]])
+
+                dexpdp_all = propagate_jacobian(mapping, J_model, inclusive=inclusive)
+                dexpdp_analytical = tf.gather(dexpdp_all, axis_norm_indices, axis=1)
+
+                # Stitch together along axis=1 (the parameter axis)
+                dexpdx_transposed = tf.dynamic_stitch(
+                    [
+                        tf.constant(axis_norm_indices, dtype=tf.int32),
+                        tf.constant(other_indices, dtype=tf.int32),
+                    ],
+                    [
+                        tf.transpose(dexpdp_analytical),
+                        tf.transpose(jacs_other[x_idx_in_dvars]),
+                    ],
+                )
+                dexpdx = tf.transpose(dexpdx_transposed)
+
+                jacs_final = []
+                for idx, var in enumerate(dvars):
+                    if var is self.x:
+                        jacs_final.append(dexpdx)
+                    else:
+                        jacs_final.append(jacs_other[idx])
+                return expected, *jacs_final
+            else:
+                with tf.GradientTape(watch_accessed_variables=False) as t:
+                    t.watch(dvars)
+                    expected = self._compute_expected(
+                        fun_exp,
+                        inclusive=inclusive,
+                        profile=profile,
+                        full=full,
+                        need_observables=need_observables,
+                    )
+                    expected_flat = tf.reshape(expected, (-1,))
+                jacs = t.jacobian(
+                    expected_flat,
+                    dvars,
+                )
+                return expected, *jacs
 
         if self.bbstat.enabled:
             dvars = [self.x, self.bbstat.ubeta]
@@ -1541,6 +1695,8 @@ class Fitter:
         profile=True,
         compute_chi2=False,
     ):
+
+        self._current_mapping = mapping
 
         if compute_variations and (
             compute_variance
