@@ -1,4 +1,5 @@
 import hashlib
+import math
 import re
 import time
 
@@ -92,6 +93,7 @@ class Fitter:
 
         self.diagnostics = options.diagnostics
         self.minimizer_method = options.minimizerMethod
+        self.hessian_chunk_size = max(0, getattr(options, "hessianChunkSize", 0))
         self.hvp_method = getattr(options, "hvpMethod", "revrev")
         # jitCompile accepts "auto" (the default), "on", or "off".
         # True / False from programmatic callers are accepted as
@@ -262,6 +264,7 @@ class Fitter:
             xdefault = self.theta0default
 
         self.x = tf.Variable(xdefault, trainable=True, name="x")
+        self._log_parameter_memory_estimate()
 
         # Per-parameter prefit variance vector. Always allocated; the
         # prefit covariance is intrinsically diagonal so this is the
@@ -429,6 +432,30 @@ class Fitter:
 
         if profile:
             self._profile_beta()
+
+    def _log_parameter_memory_estimate(self):
+        nparams_total = len(self.parms)
+        bytes_per_value = tf.as_dtype(self.x.dtype).size
+        matrix_gib = nparams_total * nparams_total * bytes_per_value / 1024**3
+        logger.info(
+            "Fit parameter count: %d total = %d param-model + %d nuisance",
+            nparams_total,
+            self.param_model.nparams,
+            self.indata.nsyst,
+        )
+        logger.info(
+            "Dense Hessian/covariance estimate: %.3f GiB per matrix, "
+            "%.3f GiB for four copies",
+            matrix_gib,
+            4.0 * matrix_gib,
+        )
+        if self.hessian_chunk_size:
+            nchunks = math.ceil(nparams_total / self.hessian_chunk_size)
+            logger.info(
+                "Final Hessian will be computed in %d chunk(s) of up to %d row(s)",
+                nchunks,
+                self.hessian_chunk_size,
+            )
 
     def update_frozen_params(self):
         logger.debug(f"Updated list of frozen params: {self.frozen_params}")
@@ -1786,13 +1813,61 @@ class Fitter:
             self.loss_val_grad_hessp = self.loss_val_grad_hessp_revrev
 
     @tf.function
-    def loss_val_grad_hess(self, profile=True):
+    def loss_val_grad_hess_full(self, profile=True):
         with tf.GradientTape() as t2:
             with tf.GradientTape() as t1:
                 val = self._compute_loss(profile=profile)
             grad = t1.gradient(val, self.x)
         hess = t2.jacobian(grad, self.x)
         return val, grad, hess
+
+    def loss_val_grad_hess_chunked(self, profile=True):
+        chunk_size = self.hessian_chunk_size
+        if chunk_size <= 0:
+            raise RuntimeError("loss_val_grad_hess_chunked requires chunk_size > 0")
+
+        with tf.GradientTape() as tape:
+            val = self._compute_loss(profile=profile)
+        grad = tape.gradient(val, self.x)
+
+        nparams = int(self.x.shape[0])
+        nchunks = math.ceil(nparams / chunk_size)
+        logger.info(
+            "Compute final Hessian in %d chunk(s) of up to %d row(s)",
+            nchunks,
+            chunk_size,
+        )
+
+        chunks = []
+        tstart = time.time()
+        for start in range(0, nparams, chunk_size):
+            stop = min(start + chunk_size, nparams)
+            with tf.GradientTape(persistent=True) as t2:
+                with tf.GradientTape() as t1:
+                    val_chunk = self._compute_loss(profile=profile)
+                grad_chunk = t1.gradient(val_chunk, self.x)
+                grad_slice = grad_chunk[start:stop]
+            hess_chunk = t2.jacobian(
+                grad_slice,
+                self.x,
+                experimental_use_pfor=False,
+            )
+            del t2
+            chunks.append(hess_chunk)
+            logger.info(
+                "  Hessian rows %d:%d completed in %.2f s",
+                start,
+                stop,
+                time.time() - tstart,
+            )
+
+        hess = tf.concat(chunks, axis=0)
+        return val, grad, hess
+
+    def loss_val_grad_hess(self, profile=True):
+        if self.hessian_chunk_size:
+            return self.loss_val_grad_hess_chunked(profile=profile)
+        return self.loss_val_grad_hess_full(profile=profile)
 
     @tf.function
     def loss_val_valfull_grad_hess(self, profile=True):

@@ -203,6 +203,15 @@ def common_parser():
         help="Mnimizer method used in scipy.optimize.minimize for the nominal fit minimization",
     )
     parser.add_argument(
+        "--hessianChunkSize",
+        default=0,
+        type=int,
+        help=(
+            "Compute the final Hessian in chunks of this many gradient rows. "
+            "The default 0 keeps the current all-at-once Hessian."
+        ),
+    )
+    parser.add_argument(
         "--hvpMethod",
         default="revrev",
         type=str,
