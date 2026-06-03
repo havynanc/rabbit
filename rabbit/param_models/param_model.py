@@ -36,6 +36,26 @@ def _active_axis_cells(indata, channel, proc_idx, selected_axes):
     return np.unique(channel_coords[:, axis_positions], axis=0).astype(np.int32)
 
 
+def _sparse_channel_entries(indata, channel, proc_idx):
+    """Return sparse norm positions and channel-local coordinates for a process."""
+    info = indata.channel_info[channel]
+    channel_shape = tuple(a.size for a in info["axes"])
+    indices = indata.norm.indices.numpy()
+    values = indata.norm.values.numpy()
+    mask = (
+        (indices[:, 0] >= info["start"])
+        & (indices[:, 0] < info["stop"])
+        & (indices[:, 1] == proc_idx)
+        & (values != 0.0)
+    )
+    positions = np.flatnonzero(mask).astype(np.int32)
+    local_rows = indices[mask, 0] - info["start"]
+    if len(local_rows) == 0:
+        return positions, np.empty((0, len(channel_shape)), dtype=np.int32)
+    coords = np.stack(np.unravel_index(local_rows, channel_shape), axis=-1)
+    return positions, coords.astype(np.int32)
+
+
 class ParamModel:
 
     def __init__(self, indata, *args, **kwargs):
@@ -65,6 +85,14 @@ class ParamModel:
         :param param: 1D tensor of explicit parameters in the fit (length nparams)
         :return 2D tensor to be multiplied with [proc,bin] tensor
         """
+
+    def compute_sparse(self, param):
+        """Compute scale factors aligned with the stored sparse norm entries."""
+        rnorm = self.compute(param, full=True)
+        rnorm = tf.broadcast_to(
+            rnorm, [self.indata.nbinsfull, self.indata.nproc]
+        )
+        return tf.gather_nd(rnorm, self.indata.norm.indices)
 
     def set_param_default(self, expectSignal, allowNegativeParam=False):
         """
@@ -133,6 +161,15 @@ class CompositeParamModel(ParamModel):
 
         rnorm = functools.reduce(lambda a, b: a * b, results)
         return rnorm
+
+    def compute_sparse(self, param):
+        start = 0
+        results = []
+        for m in self.param_models:
+            results.append(m.compute_sparse(param[start : start + m.nparams]))
+            start += m.nparams
+
+        return functools.reduce(lambda a, b: a * b, results)
 
 
 class Ones(ParamModel):
@@ -441,20 +478,49 @@ class AxisNormModel(ParamModel):
         ]
         self.n_cells = [len(cells) for cells in self.active_cells]
         self.npoi = sum(self.n_cells)
+        self.sparse_param_indices = (
+            np.full(len(indata.norm.values), -1, dtype=np.int32)
+            if indata.sparse
+            else None
+        )
 
         names = []
-        for proc_encoded, cells in zip(target_encoded, self.active_cells):
+        start = 0
+        for proc_encoded, proc_idx, cells in zip(
+            target_encoded, self.proc_idxs, self.active_cells
+        ):
             proc_name = (
                 proc_encoded.decode()
                 if isinstance(proc_encoded, bytes)
                 else str(proc_encoded)
             )
+            cell_to_param = {}
             for idxs in cells:
                 label = "_".join(
                     f"{a.name}{i}" for a, i in zip(self.requested_axes, idxs)
                 )
                 names.append(f"norm_{proc_name}_{label}".encode())
+                cell_to_param[tuple(idxs)] = start
+                start += 1
+            if indata.sparse:
+                positions, coords = _sparse_channel_entries(indata, channel, proc_idx)
+                channel_axis_names = [a.name for a in axes]
+                axis_positions = [
+                    channel_axis_names.index(a.name) for a in self.requested_axes
+                ]
+                self.sparse_param_indices[positions] = [
+                    cell_to_param[tuple(coord[axis_positions])] for coord in coords
+                ]
         self.params = np.array(names)
+        if indata.sparse:
+            self.sparse_param_indices = tf.constant(
+                self.sparse_param_indices, dtype=tf.int32
+            )
+            self.sparse_entry_mask = self.sparse_param_indices >= 0
+            self.sparse_param_indices = tf.maximum(self.sparse_param_indices, 0)
+        else:
+            self.sparse_param_indices = tf.constant([], dtype=tf.int32)
+            self.sparse_entry_mask = tf.constant([], dtype=tf.bool)
         print(
             f"AxisNormModel {channel}: {self.npoi} active parameters "
             f"across {len(self.proc_idxs)} process(es)"
@@ -528,6 +594,16 @@ class AxisNormModel(ParamModel):
             rnorms.append(irnorm)
 
         return tf.concat(rnorms, axis=0)
+
+    def compute_sparse(self, param):
+        if not self.indata.sparse:
+            return super().compute_sparse(param)
+        values = tf.square(tf.gather(param, self.sparse_param_indices))
+        return tf.where(
+            self.sparse_entry_mask,
+            values,
+            tf.ones_like(self.indata.norm.values),
+        )
 
 
 class AxisExpModel(ParamModel):
@@ -667,23 +743,82 @@ class AxisExpModel(ParamModel):
         self.n_cells = [len(cells) for cells in self.active_cells]
         self.n_slope_groups = [len(groups) for groups in self.active_slope_groups]
         self.npoi = sum(self.n_cells) + sum(self.n_slope_groups)
+        if indata.sparse:
+            sparse_size = len(indata.norm.values)
+            self.sparse_amplitude_param_indices = np.full(
+                sparse_size, -1, dtype=np.int32
+            )
+            self.sparse_slope_param_indices = np.full(
+                sparse_size, -1, dtype=np.int32
+            )
+            self.sparse_shape_values = np.zeros(sparse_size, dtype=np.int32)
+        else:
+            self.sparse_amplitude_param_indices = None
+            self.sparse_slope_param_indices = None
+            self.sparse_shape_values = None
 
         names = []
-        for proc_encoded, cells, slope_groups in zip(
-            target_encoded, self.active_cells, self.active_slope_groups
+        start = 0
+        for proc_encoded, proc_idx, cells, slope_groups in zip(
+            target_encoded, self.proc_idxs, self.active_cells, self.active_slope_groups
         ):
             proc_name = (
                 proc_encoded.decode()
                 if isinstance(proc_encoded, bytes)
                 else str(proc_encoded)
             )
+            cell_to_param = {}
             for idxs in cells:
                 label = "_".join(f"{a.name}{i}" for a, i in zip(self.cell_axes, idxs))
                 names.append(f"lnAmpl_{proc_name}_{label}".encode())
+                cell_to_param[tuple(idxs)] = start
+                start += 1
+            slope_to_param = {}
             for idxs in slope_groups:
                 label = "_".join(f"{a.name}{i}" for a, i in zip(self.slope_axes, idxs))
                 names.append(f"slope_{proc_name}_{label}".encode())
+                slope_to_param[tuple(idxs)] = start
+                start += 1
+            if indata.sparse:
+                positions, coords = _sparse_channel_entries(indata, channel, proc_idx)
+                channel_axis_names = [a.name for a in channel_axes]
+                cell_positions = [
+                    channel_axis_names.index(a.name) for a in self.cell_axes
+                ]
+                slope_positions = [
+                    channel_axis_names.index(a.name) for a in self.slope_axes
+                ]
+                shape_position = channel_axis_names.index(shape_axis)
+                self.sparse_amplitude_param_indices[positions] = [
+                    cell_to_param[tuple(coord[cell_positions])] for coord in coords
+                ]
+                self.sparse_slope_param_indices[positions] = [
+                    slope_to_param[tuple(coord[slope_positions])] for coord in coords
+                ]
+                self.sparse_shape_values[positions] = coords[:, shape_position]
         self.params = np.array(names)
+        if indata.sparse:
+            self.sparse_amplitude_param_indices = tf.constant(
+                self.sparse_amplitude_param_indices, dtype=tf.int32
+            )
+            self.sparse_slope_param_indices = tf.constant(
+                self.sparse_slope_param_indices, dtype=tf.int32
+            )
+            self.sparse_entry_mask = self.sparse_amplitude_param_indices >= 0
+            self.sparse_amplitude_param_indices = tf.maximum(
+                self.sparse_amplitude_param_indices, 0
+            )
+            self.sparse_slope_param_indices = tf.maximum(
+                self.sparse_slope_param_indices, 0
+            )
+            self.sparse_shape_values = tf.constant(
+                self.sparse_shape_values, dtype=tf.int32
+            )
+        else:
+            self.sparse_amplitude_param_indices = tf.constant([], dtype=tf.int32)
+            self.sparse_slope_param_indices = tf.constant([], dtype=tf.int32)
+            self.sparse_entry_mask = tf.constant([], dtype=tf.bool)
+            self.sparse_shape_values = tf.constant([], dtype=tf.int32)
         print(
             f"AxisExpModel {channel}: {sum(self.n_cells)} active amplitudes and "
             f"{sum(self.n_slope_groups)} active slopes across "
@@ -763,6 +898,19 @@ class AxisExpModel(ParamModel):
             rnorms.append(irnorm)
 
         return tf.concat(rnorms, axis=0)
+
+    def compute_sparse(self, param):
+        if not self.indata.sparse:
+            return super().compute_sparse(param)
+        amplitude = tf.gather(param, self.sparse_amplitude_param_indices)
+        slope = tf.gather(param, self.sparse_slope_param_indices)
+        x = tf.gather(self.x_m, self.sparse_shape_values)
+        values = tf.exp(amplitude + slope * x)
+        return tf.where(
+            self.sparse_entry_mask,
+            values,
+            tf.ones_like(self.indata.norm.values),
+        )
 
 
 class AxisBernsteinModel(ParamModel):

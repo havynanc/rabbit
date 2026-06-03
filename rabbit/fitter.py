@@ -1251,17 +1251,15 @@ class Fitter:
                 self.logk_csr = self.indata.logk_csr
             return
 
-        rnorm_init = self.param_model.compute(self.param_model.xparamdefault, full=True)
-        rnorm_init = tf.broadcast_to(
-            rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
-        )
-
         if self.indata.sparse:
             # logk dense shape is [norm_nnz, nsyst_or_2nsyst]; each value
             # at logk.indices[i] = (norm_pos, syst_pos) corresponds to the
             # (bin, proc) pair stored at norm.indices[norm_pos]. Gather
-            # rnorm_init through this two-level mapping.
-            rnorm_at_norm = tf.gather_nd(rnorm_init, self.indata.norm.indices)
+            # rnorm_init through this two-level mapping. Param models with a
+            # sparse implementation evaluate only the stored norm entries.
+            rnorm_at_norm = self.param_model.compute_sparse(
+                self.param_model.xparamdefault
+            )
             scale_per_logk = tf.gather(rnorm_at_norm, self.indata.logk.indices[:, 0])
             new_values = self.indata.logk.values * scale_per_logk
             self.logk = tf.SparseTensor(
@@ -1271,6 +1269,12 @@ class Fitter:
             )
             self.logk_csr = tf_sparse_csr.CSRSparseMatrix(self.logk)
         else:
+            rnorm_init = self.param_model.compute(
+                self.param_model.xparamdefault, full=True
+            )
+            rnorm_init = tf.broadcast_to(
+                rnorm_init, [self.indata.nbinsfull, self.indata.nproc]
+            )
             # Dense logk: [nbinsfull, nproc, nsyst] symmetric, or
             # [nbinsfull, nproc, 2, nsyst] asymmetric. Broadcast rnorm_init
             # over the trailing axes.
@@ -1291,7 +1295,6 @@ class Fitter:
         theta = self.get_theta()
 
         all_params = tf.concat([poi, model_nui], axis=0)
-        rnorm = self.param_model.compute(all_params, full)
 
         normcentral = None
         if self.indata.symmetric_tensor:
@@ -1326,7 +1329,7 @@ class Fitter:
             # the per-entry syst variation and the per-(bin, proc) POI
             # scaling rnorm. The sparsity pattern is unchanged from
             # self.indata.norm, so with_values lets us reuse the indices.
-            rnorm_sparse = tf.gather_nd(rnorm, self.indata.norm.indices)
+            rnorm_sparse = self.param_model.compute_sparse(all_params)
             if self.indata.systematic_type == "log_normal":
                 # values[i] = norm[i] * exp(logsnorm[i]) * rnorm[bin, proc]
                 snormnorm_sparse = self.indata.norm.with_values(
@@ -1358,6 +1361,7 @@ class Fitter:
             if compute_norm:
                 normcentral = tf.sparse.to_dense(snormnorm_sparse)
         else:
+            rnorm = self.param_model.compute(all_params, full)
             if full or self.indata.nbinsmasked == 0:
                 nbins = self.indata.nbinsfull
                 logk = self.logk
