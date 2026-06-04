@@ -1821,14 +1821,25 @@ class Fitter:
         hess = t2.jacobian(grad, self.x)
         return val, grad, hess
 
+    @tf.function(reduce_retracing=True)
+    def loss_val_grad_hess_chunk(self, start, stop, profile=True):
+        with tf.GradientTape(persistent=True) as t2:
+            with tf.GradientTape() as t1:
+                val = self._compute_loss(profile=profile)
+            grad = t1.gradient(val, self.x)
+            grad_slice = grad[start:stop]
+        hess_chunk = t2.jacobian(
+            grad_slice,
+            self.x,
+            experimental_use_pfor=False,
+        )
+        del t2
+        return val, grad, hess_chunk
+
     def loss_val_grad_hess_chunked(self, profile=True):
         chunk_size = self.hessian_chunk_size
         if chunk_size <= 0:
             raise RuntimeError("loss_val_grad_hess_chunked requires chunk_size > 0")
-
-        with tf.GradientTape() as tape:
-            val = self._compute_loss(profile=profile)
-        grad = tape.gradient(val, self.x)
 
         nparams = int(self.x.shape[0])
         nchunks = math.ceil(nparams / chunk_size)
@@ -1842,17 +1853,11 @@ class Fitter:
         tstart = time.time()
         for start in range(0, nparams, chunk_size):
             stop = min(start + chunk_size, nparams)
-            with tf.GradientTape(persistent=True) as t2:
-                with tf.GradientTape() as t1:
-                    val_chunk = self._compute_loss(profile=profile)
-                grad_chunk = t1.gradient(val_chunk, self.x)
-                grad_slice = grad_chunk[start:stop]
-            hess_chunk = t2.jacobian(
-                grad_slice,
-                self.x,
-                experimental_use_pfor=False,
+            val, grad, hess_chunk = self.loss_val_grad_hess_chunk(
+                tf.constant(start, tf.int32),
+                tf.constant(stop, tf.int32),
+                profile=profile,
             )
-            del t2
             chunks.append(hess_chunk)
             logger.info(
                 "  Hessian rows %d:%d completed in %.2f s",
