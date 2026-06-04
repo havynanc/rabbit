@@ -82,6 +82,9 @@ def parseArgs():
         default=None,
         help="file path of a python module containing dictionaries to rename systs, groups, processes, and channels (named rename_systs, rename_groups, etc). Old names are keys and new names are values",
     )
+    parser.add_argument(
+        "--sparse", action="store_true", help="make the merged tensor sparse"
+    )
     args = parser.parse_args()
     return args
 
@@ -123,7 +126,7 @@ def main():
         clip_dict[args.clipTensors[2 * i]] = float(args.clipTensors[2 * i + 1])
 
     writer = tensorwriter.TensorWriter(
-        systematic_type=args.systematicType,
+        systematic_type=args.systematicType, sparse=args.sparse
     )
 
     for tensor in args.tensors:

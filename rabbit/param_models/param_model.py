@@ -89,9 +89,7 @@ class ParamModel:
     def compute_sparse(self, param):
         """Compute scale factors aligned with the stored sparse norm entries."""
         rnorm = self.compute(param, full=True)
-        rnorm = tf.broadcast_to(
-            rnorm, [self.indata.nbinsfull, self.indata.nproc]
-        )
+        rnorm = tf.broadcast_to(rnorm, [self.indata.nbinsfull, self.indata.nproc])
         return tf.gather_nd(rnorm, self.indata.norm.indices)
 
     def set_param_default(self, expectSignal, allowNegativeParam=False):
@@ -477,7 +475,7 @@ class AxisNormModel(ParamModel):
             for proc_idx in self.proc_idxs
         ]
         self.n_cells = [len(cells) for cells in self.active_cells]
-        self.npoi = sum(self.n_cells)
+        self.npou = sum(self.n_cells)
         self.sparse_param_indices = (
             np.full(len(indata.norm.values), -1, dtype=np.int32)
             if indata.sparse
@@ -522,18 +520,18 @@ class AxisNormModel(ParamModel):
             self.sparse_param_indices = tf.constant([], dtype=tf.int32)
             self.sparse_entry_mask = tf.constant([], dtype=tf.bool)
         print(
-            f"AxisNormModel {channel}: {self.npoi} active parameters "
+            f"AxisNormModel {channel}: {self.npou} active parameters "
             f"across {len(self.proc_idxs)} process(es)"
         )
 
-        self.npou = 0
+        self.npoi = 0
         # Enforce non-negativity via x^2 (commented out) or softplus (current) applied inside compute()
         # so this works correctly whether called standalone or inside a composite.
         # allowNegativeParam=True tells the fitter/composite to pass raw x through;
         # the squaring is handled here. Default raw = sqrt(1) = 1 so norm starts at 1 (same true for softplus).
         self.allowNegativeParam = True
         self.is_linear = False
-        paramdefault = np.ones(self.npoi, dtype=np.float64)
+        paramdefault = np.ones(self.npou, dtype=np.float64)
         if expectSignal is not None:
             for signal, value in expectSignal:
                 encoded = signal.encode() if isinstance(signal, str) else signal
@@ -569,23 +567,21 @@ class AxisNormModel(ParamModel):
                 for proc_idx, cells, n_cell in zip(
                     self.proc_idxs, self.active_cells, self.n_cells
                 ):
-                    ipoi = param[start : start + n_cell]
+                    ipou = param[start : start + n_cell]
                     start += n_cell
                     # x^2
                     cell_scaling = tf.tensor_scatter_nd_update(
                         tf.ones(self.cell_shape, dtype=self.indata.dtype),
                         cells,
-                        tf.square(ipoi),
+                        tf.square(ipou),
                     )
                     scaling = tf.reshape(
-                        tf.broadcast_to(
-                            tf.reshape(cell_scaling, reshape), shape_input
-                        ),
+                        tf.broadcast_to(tf.reshape(cell_scaling, reshape), shape_input),
                         [-1, 1],
                     )
                     # softplus
                     # scaling = tf.reshape(
-                    #    tf.broadcast_to(tf.reshape(tf.nn.softplus(ipoi), reshape), shape_input), [-1, 1]
+                    #    tf.broadcast_to(tf.reshape(tf.nn.softplus(ipou), reshape), shape_input), [-1, 1]
                     # )
                     proc_col = tf.one_hot(
                         proc_idx, self.indata.nproc, dtype=self.indata.dtype
@@ -735,22 +731,22 @@ class AxisExpModel(ParamModel):
         ]
         slope_positions = [cell_names.index(name) for name in slope_names]
         self.active_slope_groups = [
-            np.unique(cells[:, slope_positions], axis=0).astype(np.int32)
-            if len(cells)
-            else np.empty((0, len(slope_positions)), dtype=np.int32)
+            (
+                np.unique(cells[:, slope_positions], axis=0).astype(np.int32)
+                if len(cells)
+                else np.empty((0, len(slope_positions)), dtype=np.int32)
+            )
             for cells in self.active_cells
         ]
         self.n_cells = [len(cells) for cells in self.active_cells]
         self.n_slope_groups = [len(groups) for groups in self.active_slope_groups]
-        self.npoi = sum(self.n_cells) + sum(self.n_slope_groups)
+        self.npou = sum(self.n_cells) + sum(self.n_slope_groups)
         if indata.sparse:
             sparse_size = len(indata.norm.values)
             self.sparse_amplitude_param_indices = np.full(
                 sparse_size, -1, dtype=np.int32
             )
-            self.sparse_slope_param_indices = np.full(
-                sparse_size, -1, dtype=np.int32
-            )
+            self.sparse_slope_param_indices = np.full(sparse_size, -1, dtype=np.int32)
             self.sparse_shape_values = np.zeros(sparse_size, dtype=np.int32)
         else:
             self.sparse_amplitude_param_indices = None
@@ -845,11 +841,11 @@ class AxisExpModel(ParamModel):
         ]
 
         # Always unconstrained: exp(lnAmpl + slope*x) is positive for any real (lnAmpl, slope).
-        self.npou = 0
+        self.npoi = 0
         self.allowNegativeParam = True
         self.is_linear = False
         # Default: lnAmpl=0 → amplitude=1, slope=0 → flat shape.
-        self.xparamdefault = tf.zeros([self.npoi], dtype=indata.dtype)
+        self.xparamdefault = tf.zeros([self.npou], dtype=indata.dtype)
 
     def compute(self, param, full=False):
         x_reshaped = tf.reshape(self.x_m, self.shape_reshape)
@@ -871,19 +867,19 @@ class AxisExpModel(ParamModel):
                     self.n_cells,
                     self.n_slope_groups,
                 ):
-                    a_poi = param[start : start + n_cell]
+                    a_pou = param[start : start + n_cell]
                     start += n_cell
-                    b_poi = param[start : start + n_slope]
+                    b_pou = param[start : start + n_slope]
                     start += n_slope
                     a_cells = tf.tensor_scatter_nd_update(
                         tf.zeros(self.cell_shape, dtype=self.indata.dtype),
                         cells,
-                        a_poi,
+                        a_pou,
                     )
                     b_cells = tf.tensor_scatter_nd_update(
                         tf.zeros(self.slope_shape, dtype=self.indata.dtype),
                         slope_groups,
-                        b_poi,
+                        b_pou,
                     )
                     a = tf.reshape(a_cells, self.cell_reshape)
                     b = tf.reshape(b_cells, self.slope_cell_reshape)
