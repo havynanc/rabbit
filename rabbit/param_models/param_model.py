@@ -402,10 +402,11 @@ class AxisNormModel(ParamModel):
 
     Usage::
 
-        --paramModel AxisNormModel <channel> <proc_spec> <axes>
+        --paramModel AxisNormModel <channel> <proc_spec> <axes> (<poiOrPou>)
 
     where proc_spec is ``all`` or a comma-separated list of process names,
-    and axes is a comma-separated list of axis names.
+    axes is a comma-separated list of axis names, and poiOrPou defaults to
+    indicates if the parameters should be pois or pous (defaults to poi)
 
     Example (btojpsik: independent per-cell norms for signal and flat bkg)::
 
@@ -414,13 +415,19 @@ class AxisNormModel(ParamModel):
 
     @classmethod
     def parse_args(cls, indata, *args, **kwargs):
-        if len(args) != 3:
+        if len(args) not in (3, 4):
             raise ValueError(
-                f"AxisNormModel requires exactly 3 positional arguments "
-                f"(channel, proc_spec, axes) but got {len(args)}: {args}"
+                f"AxisNormModel requires exactly 3 or 4 positional arguments "
+                f"(channel, proc_spec, axes[, poiOrPou]) but got {len(args)}: {args}"
             )
-        channel, proc_spec, axes_csv = args
-        return cls(indata, channel, proc_spec, axes_csv, **kwargs)
+        channel, proc_spec, axes_csv = args[:3]
+        if len(args) == 3:
+            usePois = True
+        else:
+            if args[3] not in ("poi", "pou"):
+                raise ValueError(f"poiOrPou must be poi or pou, but got {args[3]}")
+            usePois = args[3] == "poi"
+        return cls(indata, channel, proc_spec, axes_csv, usePois=usePois, **kwargs)
 
     def __init__(
         self,
@@ -428,6 +435,7 @@ class AxisNormModel(ParamModel):
         channel,
         proc_spec,
         axes_csv,
+        usePois=True,
         expectSignal=None,
         allowNegativeParam=False,
         **kwargs,
@@ -475,7 +483,8 @@ class AxisNormModel(ParamModel):
             for proc_idx in self.proc_idxs
         ]
         self.n_cells = [len(cells) for cells in self.active_cells]
-        self.npou = sum(self.n_cells)
+        self.npoi = sum(self.n_cells) if usePois else 0
+        self.npou = sum(self.n_cells) if not usePois else 0
         self.sparse_param_indices = (
             np.full(len(indata.norm.values), -1, dtype=np.int32)
             if indata.sparse
@@ -520,18 +529,17 @@ class AxisNormModel(ParamModel):
             self.sparse_param_indices = tf.constant([], dtype=tf.int32)
             self.sparse_entry_mask = tf.constant([], dtype=tf.bool)
         print(
-            f"AxisNormModel {channel}: {self.npou} active parameters "
+            f"AxisNormModel {channel}: {self.npoi + self.npou} active parameters "
             f"across {len(self.proc_idxs)} process(es)"
         )
 
-        self.npoi = 0
         # Enforce non-negativity via x^2 (commented out) or softplus (current) applied inside compute()
         # so this works correctly whether called standalone or inside a composite.
         # allowNegativeParam=True tells the fitter/composite to pass raw x through;
         # the squaring is handled here. Default raw = sqrt(1) = 1 so norm starts at 1 (same true for softplus).
         self.allowNegativeParam = True
         self.is_linear = False
-        paramdefault = np.ones(self.npou, dtype=np.float64)
+        paramdefault = np.ones(self.npoi + self.npou, dtype=np.float64)
         if expectSignal is not None:
             for signal, value in expectSignal:
                 encoded = signal.encode() if isinstance(signal, str) else signal
@@ -567,13 +575,13 @@ class AxisNormModel(ParamModel):
                 for proc_idx, cells, n_cell in zip(
                     self.proc_idxs, self.active_cells, self.n_cells
                 ):
-                    ipou = param[start : start + n_cell]
+                    ipoiu = param[start : start + n_cell]
                     start += n_cell
                     # x^2
                     cell_scaling = tf.tensor_scatter_nd_update(
                         tf.ones(self.cell_shape, dtype=self.indata.dtype),
                         cells,
-                        tf.square(ipou),
+                        tf.square(ipoiu),
                     )
                     scaling = tf.reshape(
                         tf.broadcast_to(tf.reshape(cell_scaling, reshape), shape_input),
@@ -581,7 +589,7 @@ class AxisNormModel(ParamModel):
                     )
                     # softplus
                     # scaling = tf.reshape(
-                    #    tf.broadcast_to(tf.reshape(tf.nn.softplus(ipou), reshape), shape_input), [-1, 1]
+                    #    tf.broadcast_to(tf.reshape(tf.nn.softplus(ipoiu), reshape), shape_input), [-1, 1]
                     # )
                     proc_col = tf.one_hot(
                         proc_idx, self.indata.nproc, dtype=self.indata.dtype
@@ -620,7 +628,7 @@ class AxisExpModel(ParamModel):
 
     Usage::
 
-        --paramModel AxisExpModel <channel> <proc_spec> <shape_axis> <cell_axes>
+        --paramModel AxisExpModel <channel> <proc_spec> <shape_axis> <cell_axes> (<slope_axes>) (<poiOrPou>)
 
     Example::
 
@@ -631,14 +639,28 @@ class AxisExpModel(ParamModel):
 
     @classmethod
     def parse_args(cls, indata, *args, **kwargs):
-        if len(args) not in (4, 5):
+        if len(args) not in (4, 5, 6):
             raise ValueError(
-                f"AxisExpModel requires 4 or 5 positional arguments "
-                f"(channel, proc_spec, shape_axis, cell_axes[, slope_axes]) "
+                f"AxisExpModel requires 4, 5, or 6 positional arguments "
+                f"(channel, proc_spec, shape_axis, cell_axes[, slope_axes, poiOrPou]) "
                 f"but got {len(args)}: {args}"
             )
         channel, proc_spec, shape_axis, cell_axes_csv = args[:4]
-        slope_axes_csv = args[4] if len(args) == 5 else None
+        if len(args) >= 5:
+            if args[4] in ("poi", "pou"):
+                usePois = args[4] == "poi"
+                slope_axes_csv = args[5] if (len(args) == 6) else None
+            elif len(args) == 5:
+                usePois = True
+                slope_axes_csv = args[4]
+            else:
+                if args[5] not in ("poi", "pou"):
+                    raise ValueError(
+                        f"if passing 6 arguments to AxisExpModel, require one to be poi or pou, "
+                        f"but got {args}"
+                    )
+                usePois = args[5] == "poi"
+                slope_axes_csv = args[4]
         return cls(
             indata,
             channel,
@@ -646,6 +668,7 @@ class AxisExpModel(ParamModel):
             shape_axis,
             cell_axes_csv,
             slope_axes_csv=slope_axes_csv,
+            usePois=usePois,
             **kwargs,
         )
 
@@ -657,6 +680,7 @@ class AxisExpModel(ParamModel):
         shape_axis,
         cell_axes_csv,
         slope_axes_csv=None,
+        usePois=True,
         expectSignal=None,
         allowNegativeParam=False,
         **kwargs,
@@ -740,7 +764,8 @@ class AxisExpModel(ParamModel):
         ]
         self.n_cells = [len(cells) for cells in self.active_cells]
         self.n_slope_groups = [len(groups) for groups in self.active_slope_groups]
-        self.npou = sum(self.n_cells) + sum(self.n_slope_groups)
+        self.npoi = sum(self.n_cells) + sum(self.n_slope_groups) if usePois else 0
+        self.npou = sum(self.n_cells) + sum(self.n_slope_groups) if not usePois else 0
         if indata.sparse:
             sparse_size = len(indata.norm.values)
             self.sparse_amplitude_param_indices = np.full(
@@ -841,11 +866,10 @@ class AxisExpModel(ParamModel):
         ]
 
         # Always unconstrained: exp(lnAmpl + slope*x) is positive for any real (lnAmpl, slope).
-        self.npoi = 0
         self.allowNegativeParam = True
         self.is_linear = False
         # Default: lnAmpl=0 → amplitude=1, slope=0 → flat shape.
-        self.xparamdefault = tf.zeros([self.npou], dtype=indata.dtype)
+        self.xparamdefault = tf.zeros([self.npoi + self.npou], dtype=indata.dtype)
 
     def compute(self, param, full=False):
         x_reshaped = tf.reshape(self.x_m, self.shape_reshape)
@@ -867,19 +891,19 @@ class AxisExpModel(ParamModel):
                     self.n_cells,
                     self.n_slope_groups,
                 ):
-                    a_pou = param[start : start + n_cell]
+                    a_poiu = param[start : start + n_cell]
                     start += n_cell
-                    b_pou = param[start : start + n_slope]
+                    b_poiu = param[start : start + n_slope]
                     start += n_slope
                     a_cells = tf.tensor_scatter_nd_update(
                         tf.zeros(self.cell_shape, dtype=self.indata.dtype),
                         cells,
-                        a_pou,
+                        a_poiu,
                     )
                     b_cells = tf.tensor_scatter_nd_update(
                         tf.zeros(self.slope_shape, dtype=self.indata.dtype),
                         slope_groups,
-                        b_pou,
+                        b_poiu,
                     )
                     a = tf.reshape(a_cells, self.cell_reshape)
                     b = tf.reshape(b_cells, self.slope_cell_reshape)
