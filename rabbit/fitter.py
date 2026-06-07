@@ -910,6 +910,7 @@ class Fitter:
             cov_stat,
             cov_stat_no_bbb,
             self.param_model.npoi,
+            self.param_model.npou,
             self.indata.noiidxs,
             self.indata.systgroupidxs,
         )
