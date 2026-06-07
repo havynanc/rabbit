@@ -661,6 +661,9 @@ class AxisExpModel(ParamModel):
                     )
                 usePois = args[5] == "poi"
                 slope_axes_csv = args[4]
+        else:
+            usePois = True
+            slope_axes_csv = None
         return cls(
             indata,
             channel,
