@@ -4,9 +4,40 @@ import argparse
 import importlib
 
 import numpy as np
+import tensorflow as tf
 from wums import logging
 
 from rabbit import debugdata, inputdata, tensorwriter
+
+
+# FitInputData auto-detects sparse vs dense from the file (indata.sparse), but
+# FitDebugData (used below to reconstruct the histograms) only supports dense
+# norm/logk. Densify a sparse input in place so each tensor is handled
+# appropriately regardless of how it was written; a dense input is a no-op, so
+# sparse and dense tensors can be merged together transparently. Only norm/logk
+# are sparse (sumw2/data_obs are always dense), and the merge already
+# materializes dense histograms, so this does not change the memory profile.
+#
+# Sparse layout note: the sparse norm is a [nbinsfull, nproc] SparseTensor, but
+# the sparse logk stores only one row per *nonzero norm position*, i.e. it is a
+# [nnz(norm), C] SparseTensor whose rows are aligned (in canonical order) with
+# norm's nonzero (bin, proc) indices, where C is the flattened per-cell syst size
+# (nsyst, or 2*nsyst for asymmetric). To recover the dense
+# [nbinsfull, nproc, C] logk that FitDebugData expects, scatter those rows back
+# to their (bin, proc) positions.
+def densify_indata(indata, logger):
+    if not getattr(indata, "sparse", False):
+        return indata
+    logger.info("Input tensor is sparse; densifying norm/logk for merging")
+    norm_indices = indata.norm.indices  # [nnz, 2] (bin, proc), canonical order
+    logk_flat = tf.sparse.to_dense(tf.sparse.reorder(indata.logk))  # [nnz, C]
+    C = int(logk_flat.shape[1])
+    indata.logk = tf.scatter_nd(
+        norm_indices, logk_flat, [indata.nbinsfull, indata.nproc, C]
+    )
+    indata.norm = tf.sparse.to_dense(tf.sparse.reorder(indata.norm))
+    indata.sparse = False
+    return indata
 
 
 # for this script, modifiying the input object should be okay and will save memory but keep this in mind for other applications
@@ -136,6 +167,7 @@ def main():
             logger.info(f"(clipping at thresh of {clip_dict[tensor]})")
         logger.info("Loading inputdata")
         indata = inputdata.FitInputData(tensor)
+        indata = densify_indata(indata, logger)
         signals = np.array([s.decode("UTF-8") for s in indata.signals])
         logger.info("Loading debugdata")
         debug_data = debugdata.FitDebugData(indata)
