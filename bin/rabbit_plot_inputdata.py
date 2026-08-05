@@ -189,6 +189,7 @@ def make_plot(
     axes_names,
     selections=None,
     selection_edges=None,
+    selection_sizes=None,
     channel="",
     colors=[],
     labels=[],
@@ -445,7 +446,14 @@ def make_plot(
         outfile += "_".join(axes_names)
         outfile += f"_{channel}"
         if selections is not None:
-            outfile += "_" + "_".join([f"{a}{i}" for a, i in selections.items()])
+            # zero-pad each bin index to the width of its axis' bin count so the
+            # lexicographic order of file names matches the natural bin ordering
+            selection_strs = []
+            for a, i in selections.items():
+                size = selection_sizes.get(a) if selection_sizes else None
+                width = len(str(size - 1)) if size and size > 1 else 0
+                selection_strs.append(f"{a}{i:0{width}d}")
+            outfile += "_" + "_".join(selection_strs)
         if args.postfix:
             outfile += f"_{args.postfix}"
         plot_tools.save_pdf_and_png(outdir, outfile)
@@ -558,6 +566,7 @@ def main():
             if n in hists_proc[0].axes.name
         ]
         if len(selection_axes) > 0:
+            selection_sizes = {a.name: a.size for a in selection_axes}
             other_axes = [a for a in hists_proc[0].axes if a not in selection_axes]
             if len(args.select):
                 bin_combinations = [args.select]
@@ -597,6 +606,7 @@ def main():
                     hs_syst_up,
                     selections=idxs,
                     selection_edges=selection_edges,
+                    selection_sizes=selection_sizes,
                     labels=labels,
                     colors=colors,
                     procs=procs,
