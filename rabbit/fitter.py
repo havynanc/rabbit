@@ -41,7 +41,7 @@ def match_regexp_params(regular_expressions, parameter_names):
 
 
 class FitterCallback:
-    def __init__(self, xv, early_stopping=-1):
+    def __init__(self, xv, early_stopping=-1, early_stopping_tol=0.0):
         self.iiter = 0
         self.xval = xv
 
@@ -51,6 +51,7 @@ class FitterCallback:
         self.t0 = time.time()
 
         self.early_stopping = early_stopping
+        self.early_stopping_tol = early_stopping_tol
 
     def __call__(self, intermediate_result):
         loss = intermediate_result.fun
@@ -62,7 +63,8 @@ class FitterCallback:
         if (
             self.early_stopping > 0
             and len(self.loss_history) > self.early_stopping
-            and self.loss_history[-self.early_stopping] <= loss
+            and self.loss_history[-self.early_stopping] - loss
+            <= self.early_stopping_tol
         ):
             raise ValueError(
                 f"No reduction in loss after {self.early_stopping} iterations, early stopping."
@@ -84,6 +86,7 @@ class Fitter:
         self.indata = indata
 
         self.earlyStopping = options.earlyStopping
+        self.earlyStoppingTol = getattr(options, "earlyStoppingTol", 0.0)
         self.globalImpactsFromJVP = globalImpactsFromJVP
 
         if self.indata.systematic_type not in Fitter.valid_systematic_types:
@@ -420,15 +423,15 @@ class Fitter:
 
         if cov_ext is not None:
             if self.cov is None:
-                raise RuntimeError(
+                logger.warning(
                     "load_fitresult: external covariance was provided but "
-                    "the fitter was constructed with --noHessian (no full "
-                    "covariance is allocated). Construct the fitter without "
-                    "--noHessian to load an external covariance."
+                    "the fitter was constructed with --noHessian, so only "
+                    "the common parameter values will be loaded."
                 )
-            covval = self.cov.numpy()
-            covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
-            self.cov.assign(tf.constant(covval))
+            else:
+                covval = self.cov.numpy()
+                covval[np.ix_(idxs, idxs)] = cov_ext[np.ix_(idxs_ext, idxs_ext)]
+                self.cov.assign(tf.constant(covval))
 
         if profile:
             self._profile_beta()
@@ -1543,12 +1546,10 @@ class Fitter:
         res = tf.reshape(res, (-1, 1))
         ndf = tf.size(res) - ndf_reduction
 
-        if ndf_reduction > 0:
-            # covariance matrix is in general non invertible with ndf < n
-            # compute chi2 using pseudo inverse
-            chi_square_value = tf.transpose(res) @ tf.linalg.pinv(res_cov) @ res
-        else:
-            chi_square_value = tf.transpose(res) @ tf.linalg.solve(res_cov, res)
+        # The projection covariance can be singular after sparse/occupancy masks
+        # remove bins, even when there is no explicit ndf reduction. Use the
+        # Moore-Penrose pseudo-inverse for a well-defined chi2 in those cases.
+        chi_square_value = tf.transpose(res) @ tf.linalg.pinv(res_cov) @ res
 
         return tf.squeeze(chi_square_value), ndf
 
@@ -1657,7 +1658,22 @@ class Fitter:
             # normalization factor for normal distribution: log(1/sqrt(2*pi)) = -0.9189385332046727
             lc = lc + 0.9189385332046727 * self.indata.constraintweights
 
-        return tf.reduce_sum(lc)
+        lc = tf.reduce_sum(lc)
+
+        if self.param_model.nparams:
+            model_params = self.x[: self.param_model.nparams]
+            model_constraint_weights = self.param_model.param_constraint_weights
+            model_constraint_means = self.param_model.param_constraint_means
+            lc_model = (
+                model_constraint_weights
+                * 0.5
+                * tf.square(model_params - model_constraint_means)
+            )
+            if full_nll:
+                lc_model = lc_model + 0.9189385332046727 * model_constraint_weights
+            lc = lc + tf.reduce_sum(lc_model)
+
+        return lc
 
     def _compute_lbeta(self, beta, full_nll=False):
         return self.bbstat.lbeta(beta, full_nll=full_nll)
@@ -1931,7 +1947,7 @@ class Fitter:
 
         xval = self.x.numpy()
 
-        callback = FitterCallback(xval, self.earlyStopping)
+        callback = FitterCallback(xval, self.earlyStopping, self.earlyStoppingTol)
 
         if self.minimizer_method in [
             "trust-krylov",

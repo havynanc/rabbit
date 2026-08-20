@@ -40,6 +40,51 @@ from wums import output_tools, logging  # isort: skip
 logger = None
 
 
+def log_hessian_failure_diagnostics(hess, parms, n_modes=5, n_components=12):
+    hess_np = np.asarray(hess)
+    parms = np.asarray(parms).astype(str)
+    try:
+        eigvals, eigvecs = np.linalg.eigh(0.5 * (hess_np + hess_np.T))
+    except Exception:
+        logger.exception("Failed to compute Hessian eigenvalue diagnostics")
+        return
+
+    logger.error(
+        "Hessian eigenvalue diagnostics: min=%g, max=%g, n_nonpositive=%d",
+        eigvals[0],
+        eigvals[-1],
+        int(np.count_nonzero(eigvals <= 0.0)),
+    )
+    for imode in range(min(n_modes, eigvals.size)):
+        vec = eigvecs[:, imode]
+        order = np.argsort(np.abs(vec))[::-1][:n_components]
+        logger.error("  eigenmode %d eigenvalue=%g", imode, eigvals[imode])
+        for idx in order:
+            logger.error(
+                "    %+.4g  %s",
+                vec[idx],
+                parms[idx] if idx < parms.size else f"<param {idx}>",
+            )
+
+
+def regularize_hessian_to_min_eigenvalue(hess, target_min_eigenvalue):
+    hess_np = np.asarray(hess)
+    hess_sym = 0.5 * (hess_np + hess_np.T)
+    eigvals = np.linalg.eigvalsh(hess_sym)
+    min_eig = eigvals[0]
+    shift = max(0.0, float(target_min_eigenvalue) - float(min_eig))
+    if shift:
+        logger.warning(
+            "Regularize Hessian diagonal by %g to enforce minimum eigenvalue %g "
+            "(original minimum eigenvalue %g)",
+            shift,
+            target_min_eigenvalue,
+            min_eig,
+        )
+        hess_sym = hess_sym + np.eye(hess_sym.shape[0], dtype=hess_sym.dtype) * shift
+    return tf.constant(hess_sym, dtype=hess.dtype)
+
+
 def make_parser():
     parser = parsing.common_parser()
     parser.add_argument("--outname", default="fitresults.hdf5", help="output file name")
@@ -328,6 +373,8 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 toy_theta0 = tf.identity(fitter_saturated.theta0)
                 saved_regularizers = fitter_saturated.regularizers
                 saved_tau = float(fitter_saturated.tau.numpy())
+                nominal_nparams = fitter.param_model.nparams
+                nominal_x = tf.identity(fitter.x)
                 fitter_saturated.init_fit_parms(
                     composite_model,
                     args.setConstraintMinimum,
@@ -338,12 +385,27 @@ def save_hists(args, mappings, fitter, ws, prefit=True, profile=False):
                 fitter_saturated.regularizers = saved_regularizers
                 fitter_saturated.tau.assign(saved_tau)
 
-                fitter_saturated.xdefaultassign()
+                saturated_x = tf.concat(
+                    [
+                        nominal_x[:nominal_nparams],
+                        saturated_model.xparamdefault,
+                        nominal_x[nominal_nparams:],
+                    ],
+                    axis=0,
+                )
+                fitter_saturated.x.assign(saturated_x)
                 cb = fitter_saturated.minimize()
                 if not args.noHessian:
                     _, grad, hess = fitter_saturated.loss_val_grad_hess()
-                    edmval, cov = fitter_saturated.edmval_cov(grad, hess)
-                    logger.info(f"edmval: {edmval}")
+                    try:
+                        edmval, cov = fitter_saturated.edmval_cov(grad, hess)
+                        logger.info(f"edmval: {edmval}")
+                    except ValueError as ex:
+                        logger.warning(
+                            "Could not compute saturated projection EDM/covariance; "
+                            f"continue with saturated likelihood test only. ({ex})"
+                        )
+                        edmval = None
                 else:
                     edmval = None
 
@@ -453,7 +515,16 @@ def fit(args, fitter, ws, dofit=True):
     if not args.noEDM and not args.noHessian:
         # compute the covariance matrix and estimated distance to minimum
         _, grad, hess = fitter.loss_val_grad_hess()
-        edmval, cov = fitter.edmval_cov(grad, hess)
+        try:
+            edmval, cov = fitter.edmval_cov(grad, hess)
+        except ValueError:
+            log_hessian_failure_diagnostics(hess, fitter.parms)
+            if args.hessianMinEigenvalue is None:
+                raise
+            hess = regularize_hessian_to_min_eigenvalue(
+                hess, args.hessianMinEigenvalue
+            )
+            edmval, cov = fitter.edmval_cov(grad, hess)
         logger.info(f"edmval: {edmval}")
 
         ws.add_cov_hist(cov)

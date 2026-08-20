@@ -426,7 +426,11 @@ def make_plot(
 
     # need to divide by bin width
     binwidth = edges[1:] - edges[:-1] if binwnorm else 1.0
-    if h_inclusive.storage_type != hist.storage.Weight:
+    has_inclusive_uncertainty = h_inclusive.storage_type == hist.storage.Weight
+    if (
+        not has_inclusive_uncertainty
+        and (not args.noUncertainty or args.upperPanelUncertaintyBand)
+    ):
         raise ValueError(
             f"Did not find uncertainties in {fittype} hist. Make sure you run rabbit_fit with --computeHistErrors!"
         )
@@ -758,8 +762,13 @@ def make_plot(
             extra_labels_upper.append(pred_label)
 
     if args.ylim is None and binwnorm is None:
-        max_y = np.max(h_inclusive.values() + h_inclusive.variances() ** 0.5)
-        min_y = np.min(h_inclusive.values() - h_inclusive.variances() ** 0.5)
+        inclusive_uncertainty = (
+            h_inclusive.variances() ** 0.5
+            if has_inclusive_uncertainty
+            else np.zeros_like(h_inclusive.values())
+        )
+        max_y = np.max(h_inclusive.values() + inclusive_uncertainty)
+        min_y = np.min(h_inclusive.values() - inclusive_uncertainty)
 
         if h_data is not None:
             max_y = max(max_y, np.max(h_data.values() + h_data.variances() ** 0.5))
@@ -771,7 +780,12 @@ def make_plot(
 
     if args.ylim is not None and args.ylim[0] > args.ylim[1]:
         # configuration to set minimum to args.ylim[0] (e.g. 0 when we have event yields) and maximum automatically
-        max_y = np.max(h_inclusive.values() + h_inclusive.variances() ** 0.5)
+        inclusive_uncertainty = (
+            h_inclusive.variances() ** 0.5
+            if has_inclusive_uncertainty
+            else np.zeros_like(h_inclusive.values())
+        )
+        max_y = np.max(h_inclusive.values() + inclusive_uncertainty)
         if h_data is not None:
             max_y = max(max_y, np.max(h_data.values() + h_data.variances() ** 0.5))
         min_y = args.ylim[0]

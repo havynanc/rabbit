@@ -188,6 +188,12 @@ def common_parser():
         help="Number of iterations with no improvement after which training will be stopped. Specify -1 to disable.",
     )
     parser.add_argument(
+        "--earlyStoppingTol",
+        default=0.0,
+        type=float,
+        help="Minimum loss improvement counted by --earlyStopping. The default preserves exact old behavior.",
+    )
+    parser.add_argument(
         "--minimizerMethod",
         default="trust-krylov",
         type=str,
@@ -209,6 +215,18 @@ def common_parser():
         help=(
             "Compute the final Hessian in chunks of this many gradient rows. "
             "The default 0 keeps the current all-at-once Hessian."
+        ),
+    )
+    parser.add_argument(
+        "--hessianMinEigenvalue",
+        default=None,
+        type=float,
+        help=(
+            "If the final Hessian Cholesky decomposition fails, symmetrize the "
+            "Hessian and shift its diagonal so the smallest eigenvalue is at "
+            "least this value. This is an explicit fallback for numerically "
+            "near-singular fits; by default non-positive-definite Hessians "
+            "remain fatal."
         ),
     )
     parser.add_argument(

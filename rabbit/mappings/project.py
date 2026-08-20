@@ -68,6 +68,22 @@ class Project(ChannelMapping):
     def compute(self, param, observables):
         return self.project(observables)
 
+    @tf.function
+    def get_data(self, data, data_var=None, data_cov_inv=None):
+        if data_cov_inv is not None:
+            return super().get_data(data, data_var, data_cov_inv)
+
+        values = self.project(self.term.select(data, inclusive=True))
+        if data_var is None:
+            variances = values
+        else:
+            variances = self.project(self.term.select(data_var, inclusive=True))
+
+        values = tf.reshape(values, [-1])
+        variances = tf.reshape(variances, [-1])
+        cov = tf.linalg.diag(variances)
+        return values, variances, cov
+
 
 class Normalize(Project):
     """
